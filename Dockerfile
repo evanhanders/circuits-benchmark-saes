@@ -45,17 +45,6 @@ RUN mkdir project_template \
     # Run Pyright so its Node.js package gets installed
     && pyright .
 
-
-FROM main-pre-pip as main-pip-tools
-RUN pip install "pip-tools ~=7.4.1"
-
-FROM main-pre-pip as main
-COPY --chown=${USERNAME}:${USERNAME} requirements.txt ./
-# Install all dependencies, which should be explicit in `requirements.txt`
-RUN pip install --no-deps -r requirements.txt \
-    && rm -rf "${HOME}/.cache" \
-    && pyright .
-
 # Copy whole repo
 COPY --chown=${USERNAME}:${USERNAME} . .
 
