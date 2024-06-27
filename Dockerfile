@@ -9,6 +9,8 @@ RUN apt-get update -q \
     && apt-get install -y --no-install-recommends \
     # essential for running
     git git-lfs tini \
+    # additional packages for circuits bench
+    libgl1-mesa-glx graphviz graphviz-dev build-essential \
     # nice to have for devbox development
     curl vim tmux less sudo rsync wget \
     # CircleCI
@@ -34,6 +36,10 @@ RUN python3 -m venv "${VIRTUAL_ENV}" --system-site-packages \
 USER ${USERNAME}
 WORKDIR "/workspace"
 
+## Set PATH and install Jupyter
+RUN /bin/bash -c 'mkdir -p $HOME && touch $HOME/.profile && echo "export PATH=\$PATH:\$HOME/.local/bin" >> $HOME/.profile'
+RUN /bin/bash -c 'source $HOME/.profile && pip install -U jupyter'
+
 # Copy package installation instructions and version.txt files
 COPY --chown=${USERNAME}:${USERNAME} pyproject.toml ./
 
@@ -42,8 +48,15 @@ RUN mkdir project_template \
     && touch project_template/__init__.py \
     && pip install --require-virtualenv --config-settings editable_mode=compat -e '.[dev]' \
     && rm -rf "${HOME}/.cache" "./dist" \
+    # Uninstall tracr if it got installed for compatibility with circuits-benchmark
+    && pip uninstall -y tracr \
     # Run Pyright so its Node.js package gets installed
     && pyright .
+
+# Clone the repository and install
+RUN git clone --recurse-submodules https://github.com/evanhanders/circuits-benchmark.git \
+    && cd circuits-benchmark \
+    && pip install -q -e .
 
 # Copy whole repo
 COPY --chown=${USERNAME}:${USERNAME} . .
