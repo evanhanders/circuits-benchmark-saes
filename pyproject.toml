@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cluster-setup"
+description = "Sparse autoencoders and other interp"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["interpretability", "explainable-ai"]
+license = {text = "MIT License"}
+dependencies = [
+    "accelerate",   # For device_map in from_pretrained
+    "datasets",
+    "einops",
+    "jaxtyping",
+    "safetensors",
+    "simple-parsing",
+    "torch",
+    "transformers",
+    "transformer_lens",
+    "sae_lens",
+    "triton",
+    "mamba_lens @ git+https://github.com/Phylliida/MambaLens.git",
+    # format/CI
+    "ruff",
+    "pyright",
+    "pytest",
+    "numpy<2.0.0",  # 2.0 Unsupported by datasets
+]
+version = "0.1.0"
