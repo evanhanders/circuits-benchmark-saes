@@ -5,9 +5,11 @@ import torch as t
 import numpy as np
 from datasets import Dataset
 
+from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, decoders, trainers
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 from transformer_lens.HookedTransformer import HookedTransformer
 from transformer_lens.hook_points import HookedRootModule, HookPoint
+from transformers import PreTrainedTokenizerFast
 from iit.utils.correspondence import Correspondence, HLNode, LLNode
 from iit.utils.index import Ix
 
@@ -227,7 +229,7 @@ def get_LL_parens_model_and_correspondence(
         n_layers = 2,
         d_model = 16,
         n_ctx = 20,
-        d_head = 16,
+        d_head = 8,
         d_vocab = 4,
         act_fn = "relu",
     )
@@ -269,4 +271,43 @@ def get_LL_parens_model_and_correspondence(
             
     return model, corr_obj, unused_hook_nodes
     
+def paren_checker_loss_fn(
+    outputs : Float[t.Tensor, "batch n_ctx d_vocab"], #logits
+    labels : Int[t.Tensor, "batch"]
+) -> Float[t.Tensor, ""]:
+    return t.nn.BCEWithLogitsLoss()(outputs[:,-1, -1], labels)
+
+def create_tokenizer(vocab: dict) -> PreTrainedTokenizerFast:
+    # Create a Tokenizer with a WordLevel model
+    tokenizer = Tokenizer(models.WordLevel(vocab=vocab, unk_token="UNK"))
     
+    # Set the normalizer, pre-tokenizer, and decoder
+    tokenizer.normalizer = normalizers.Sequence([normalizers.Lowercase(), normalizers.StripAccents()])
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    
+    # Convert to Hugging Face tokenizer
+    hf_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
+    
+    # Add the special tokens to the Hugging Face tokenizer
+    hf_tokenizer.add_special_tokens({
+        'unk_token': 'UNK',
+        'bos_token': 'BOS',
+        'cls_token': '[CLS]',
+        'sep_token': '[SEP]',
+        'pad_token': '[PAD]',
+        'mask_token': '[MASK]'
+    })
+    return hf_tokenizer
+
+def create_paren_checker_tokenizer() -> PreTrainedTokenizerFast:
+    # create tokenizer
+    # Define your simple vocabulary
+    vocab = {'BOS': 0, '(': 1, ')': 2, '[PAD]': 3, 'UNK' : 4}
+    hf_tokenizer = create_tokenizer(vocab)
+    
+    # Test the tokenizer
+    encoded = hf_tokenizer.encode("BOS ( ) ( ) [PAD] [PAD] [PAD]")
+    decoded = hf_tokenizer.decode(encoded)
+    print(f"Encoded: {encoded}")
+    print(f"Decoded: {decoded}")
+    return hf_tokenizer

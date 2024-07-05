@@ -1,5 +1,6 @@
 from functools import partial
 from typing import Tuple, Callable
+from jaxtyping import Int, Float
 
 from datasets import Dataset
 
@@ -7,9 +8,9 @@ import torch as t
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-from transformer_lens import ActivationCache
-from transformer_lens.hook_points import HookPoint
-from iit.utils.correspondence import LLNode #Correspondence, HLNode, 
+from transformer_lens import ActivationCache, HookedTransformer
+from transformer_lens.hook_points import HookPoint, HookedRootModule
+from iit.utils.correspondence import LLNode, Correspondence
 
 def build_traintest_dataloaders(
     dataset: Dataset, 
@@ -34,7 +35,11 @@ def build_traintest_dataloaders(
     test_dataloader2  = DataLoader(test_t_dataset, batch_size=batch_size)
     return (train_dataloader, train_dataloader2), (test_dataloader, test_dataloader2)
 
-def HL_interchange_intervention(activation, hook, cache):
+def HL_interchange_intervention(
+    activation : t.Tensor, 
+    hook : HookPoint, 
+    cache: ActivationCache
+) -> t.Tensor:
     activation = cache[hook.name]
     return activation
 
@@ -91,17 +96,17 @@ def make_post_ablation_hook(
 class ModelTrainerSIIT:
     def __init__(
         self,
-        ll_model, 
-        hl_model, 
-        dataset, 
-        corr,
-        unused_nodes,
-        loss_fn,
-        baseline_weight = 1,
-        iit_weight = 1,
-        siit_weight = 1,
-        batch_size = 256,
-        device = 'cpu'
+        ll_model : HookedTransformer, 
+        hl_model : HookedRootModule, 
+        dataset : Dataset, 
+        corr: Correspondence,
+        unused_nodes : list,
+        loss_fn : Callable,
+        baseline_weight : float = 1.,
+        iit_weight : float = 1.,
+        siit_weight : float = 1.,
+        batch_size : int = 256,
+        device : str = 'cpu'
     ):
         self.ll_model = ll_model.to(device)
         self.hl_model = hl_model.to(device)
@@ -116,7 +121,12 @@ class ModelTrainerSIIT:
         self.iit_weight = iit_weight
         self.siit_weight = siit_weight
 
-    def get_iit_loss(self, b_input, hl_cache, ll_cache):
+    def get_iit_loss(
+        self, 
+        b_input : Int[t.Tensor, "batch n_ctx"], 
+        hl_cache : ActivationCache, 
+        ll_cache : ActivationCache
+    ) -> Tuple[Float[t.Tensor, ''], Float[t.Tensor, '']]:
         # sample one of the operations to do the intervention on:
         hl_node = self.corr_keys[t.randint(0, len(self.corr_keys), (1,)).item()]
         ll_nodes = self.corr[hl_node]
@@ -145,7 +155,12 @@ class ModelTrainerSIIT:
         
         return iit_loss, iia
 
-    def get_siit_loss(self, b_input, b_label, ll_cache):
+    def get_siit_loss(
+        self, 
+        b_input : Int[t.Tensor, "batch n_ctx"], 
+        b_label : Float[t.Tensor, "batch"], 
+        ll_cache : ActivationCache
+    ) -> Float[t.Tensor, '']:
         # Sample a hook from the unused ones
         #TODO: Try different sampling techniques here.
         siit_node = self.unused_nodes[t.randint(0, len(self.unused_nodes), (1,)).item()]
@@ -154,11 +169,16 @@ class ModelTrainerSIIT:
         siit_output = self.ll_model.run_with_hooks(b_input, fwd_hooks=[
             (siit_node.name, siit_hook_fn)
         ])
-        siit_loss = self.loss_fn(siit_output, b_label.float())
+        siit_loss = self.loss_fn(siit_output, b_label)
         return siit_loss
         
 
-    def train(self, epochs: int, use_wandb: bool = False, **optim_kwargs):
+    def train(
+        self, 
+        epochs: int, 
+        use_wandb: bool = False, 
+        **optim_kwargs
+    ) -> dict:
         if use_wandb:
             raise NotImplementedError()
 
@@ -169,7 +189,6 @@ class ModelTrainerSIIT:
             print(f"Epoch {epoch + 1}/{epochs}")
             self.ll_model.train()  # Set the model to training mode
             
-            # Initialize tqdm progress bar for training
             metrics = {
                 "train_loss" : [],
                 "train_baseline_loss" : [],
@@ -184,10 +203,8 @@ class ModelTrainerSIIT:
             }
             train_progress_bar = tqdm(zip(*self.train_dataloaders), desc="Training", leave=False)
             for b, s in train_progress_bar:
-                # Zero the parameter gradients
                 optimizer.zero_grad()
 
-                #Run s through to get the activations from it.
                 with t.no_grad():
                     _, hl_cache = self.hl_model.run_with_cache(s[0])
                     _, ll_cache = self.ll_model.run_with_cache(s[0])
@@ -200,12 +217,11 @@ class ModelTrainerSIIT:
                 ##########
                 #SIIT loss 
                 ##########
-                siit_loss = self.get_siit_loss(b[0], b[1].to(self.device), ll_cache)
+                siit_loss = self.get_siit_loss(b[0], b[1].float().to(self.device), ll_cache)
         
                 ####################
                 # Behavior loss
                 ####################
-                # Get the inputs and labels from the batch
                 inputs, labels = b
                 outputs = self.ll_model(inputs)
                 baseline_loss = self.loss_fn(outputs, labels.to(self.device))
@@ -215,14 +231,12 @@ class ModelTrainerSIIT:
                         + self.iit_weight*iit_loss \
                         + self.siit_weight*siit_loss
 
-                #Update metrics
                 metrics['train_loss'].append(loss.item())
                 metrics['train_baseline_loss'].append(baseline_loss.item())
                 metrics['train_iit_loss'].append(iit_loss.item())
                 metrics['train_siit_loss'].append(siit_loss.item())
                 metrics['train_IIA'].append(iia.item())
         
-                # Backward pass and optimize
                 loss.backward()
                 optimizer.step()
         
@@ -230,15 +244,16 @@ class ModelTrainerSIIT:
             
         
             # Evaluation phase
-            self.ll_model.eval()  # Set the model to evaluation mode
-            with t.no_grad():  # No need to compute gradients during evaluation
+            self.ll_model.eval() 
+            with t.no_grad():  # Don't compute gradients during evaluation
                 
                 val_progress_bar = tqdm(zip(*self.test_dataloaders), desc="Validation", leave=False)
+                measures = [0]*5
+                n_iters = 0
                 for batch, s in val_progress_bar:
                     
                     inputs, labels = batch
                     
-                     #Run s through to get the activations from it.
                     _, hl_cache = self.hl_model.run_with_cache(s[0])
                     _, ll_cache = self.ll_model.run_with_cache(s[0])
                     
@@ -250,25 +265,28 @@ class ModelTrainerSIIT:
                     ##########
                     #SIIT loss 
                     ##########
-                    siit_loss = self.get_siit_loss(inputs, labels.to(self.device), ll_cache)
+                    siit_loss = self.get_siit_loss(inputs, labels.float().to(self.device), ll_cache)
             
                     ####################
                     # Behavior loss
                     ####################
-                    # Get the inputs and labels from the batch
-        
-                    # Forward pass
                     outputs = self.ll_model(inputs)
-        
-                    # Compute the loss
                     loss = self.loss_fn(outputs, labels.to(self.device))
+
+                    measures[0] += loss.item()
+                    measures[1] += baseline_loss.item()
+                    measures[2] += iit_loss.item()
+                    measures[3] += siit_loss.item()
+                    measures[4] += iia.item()
+                    n_iters += 1
                     
-                    metrics['test_loss'].append(loss.item())
-                    metrics['test_baseline_loss'].append(baseline_loss.item())
-                    metrics['test_iit_loss'].append(iit_loss.item())
-                    metrics['test_siit_loss'].append(siit_loss.item())
-                    metrics['test_IIA'].append(iia.item())
                     val_progress_bar.set_postfix(loss=loss.item())
+            
+                metrics['test_loss'] = measures[0] / n_iters
+                metrics['test_baseline_loss'] = measures[1] / n_iters
+                metrics['test_iit_loss'] = measures[2] / n_iters
+                metrics['test_siit_loss'] = measures[3] / n_iters
+                metrics['test_IIA'] = measures[4] / n_iters
 
         return metrics
         
