@@ -3,9 +3,13 @@ import json
 from safetensors.torch import save_file
 from typing import Optional
 
+import numpy as np
+import pandas as pd
 import torch as t
 import wandb
 from datasets import Dataset
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
 
 import sae_lens
 from transformer_lens import HookedTransformer
@@ -270,11 +274,12 @@ def train_sae(
     model : HookedTransformer,
     runner_cfg : LanguageModelSAERunnerConfig,
     dataset : Dataset,
-    
+    batch_size : int = 256,
+    ignore_tokens : Optional[list] = None    
 ):
     store = RepeatActivationsStore.from_config(model, runner_cfg, dataset=dataset)
     sae = TrainingSAE(runner_cfg)
-    trainer = SAETrainer(model, sae, store, save_checkpoint, cfg = runner_cfg)
+    trainer = SAETrainerFromDataset(model, sae, store, save_checkpoint, cfg = runner_cfg)
     
     if runner_cfg.log_to_wandb:
         wandb.init(
@@ -283,10 +288,185 @@ def train_sae(
             name=runner_cfg.run_name,
             id=runner_cfg.wandb_id,
         )
-    trainer.fit()
+    trainer.fit(
+        dataset,
+        batch_size=batch_size,
+        ignore_tokens=ignore_tokens
+    )
 
     if runner_cfg.log_to_wandb:
         wandb.finish()
 
     return sae, store
+
+class SAETrainerFromDataset(SAETrainer):
     
+    def fit(
+        self,
+        dataset: Dataset,
+        batch_size : int = 256,
+        ignore_tokens : Optional[list] = None    
+    ) -> TrainingSAE:
+
+        pbar = tqdm(total=self.cfg.total_training_tokens, desc="Training SAE")
+
+        self._estimate_norm_scaling_factor_if_needed()
+        
+        t_dataset = TensorDataset(
+            t.tensor(dataset['tokens']).int(), 
+            t.tensor(dataset['labels']).float()
+        )
+        dataloader  = iter(DataLoader(t_dataset, batch_size=batch_size, shuffle = True))
+        
+        # Convert bad_tokens to a tensor
+        ignore_tokens_tensor = t.tensor(ignore_tokens)
+        prev_pbar = 0
+
+        # Train loop
+        while self.n_training_tokens < self.cfg.total_training_tokens:
+            try:
+                next_batch = next(dataloader)
+            except StopIteration:
+                dataloader  = iter(DataLoader(t_dataset, batch_size=batch_size, shuffle = True))
+                next_batch = next(dataloader)
+            next_tokens, labels = next_batch
+
+            layerwise_activations = self.model.run_with_cache(
+                next_tokens,
+                names_filter=[self.cfg.hook_name],
+                stop_at_layer=self.cfg.hook_layer + 1,
+                prepend_bos=False,
+                **self.activation_store.model_kwargs,
+            )[1][self.activation_store.hook_name]
+            
+            if self.activation_store.hook_head_index is not None:
+                activations = layerwise_activations[
+                    :, :, self.activation_store.hook_head_index
+                ]
+            else:
+                activations = layerwise_activations
+
+            activations = activations.reshape(-1, self.cfg.d_in)
+            tokens = next_tokens.flatten().int()
+            
+            # Create a mask for tokens that are not in bad_tokens
+            mask = ~t.isin(tokens, ignore_tokens_tensor)
+            
+            # Use the mask to select the desired rows from activations
+            filtered_activations = activations[mask]
+            self.n_training_tokens += filtered_activations.shape[0]
+
+            step_output = self._train_step(sae=self.sae, sae_in=filtered_activations)
+
+            if self.cfg.log_to_wandb:
+                self._log_train_step(step_output)
+                self._run_and_log_evals()
+
+            self._checkpoint_if_needed()
+            self.n_training_steps += 1
+            if self.n_training_steps % 100 == 0:
+                pbar.set_description(
+                    f"{self.n_training_steps}| MSE Loss {step_output.mse_loss:.3f} | L1 {step_output.l1_loss:.3f}"
+                )
+                pbar.update(self.n_training_tokens - prev_pbar)
+                prev_pbar = self.n_training_tokens
+
+            ### If n_training_tokens > sae_group.cfg.training_tokens, then we should switch to fine-tuning (if we haven't already)
+            self._begin_finetuning_if_needed()
+
+        # save final sae group to checkpoints folder
+        self.save_checkpoint(
+            trainer=self,
+            checkpoint_name=f"final_{self.n_training_tokens}",
+            wandb_aliases=["final_model"],
+        )
+
+        pbar.close()
+        return self.sae
+
+### This is modified from Eoin Farrell's code, which is modified from Neel Nanda's code ###
+def make_token_df(model, tokens, len_prefix=5, len_suffix=1):
+    str_tokens = [process_tokens(model.to_str_tokens(t)) for t in tokens]
+    unique_token = [[f"{s}/{i}" for i, s in enumerate(str_tok)] for str_tok in str_tokens]
+
+    context = []
+    batch = []
+    pos = []
+    label = []
+    prefix_list = []
+    suffix_list = []
+    print("tokens", tokens.shape)
+    for b in range(tokens.shape[0]):
+        # context.append([])
+        # batch.append([])
+        # pos.append([])
+        # label.append([])
+        for p in range(tokens.shape[1]):
+            prefix = "".join(str_tokens[b][max(0, p-len_prefix):p])
+            if p==tokens.shape[1]-1:
+                suffix = ""
+            else:
+                suffix = "".join(str_tokens[b][p+1:min(tokens.shape[1]-1, p+1+len_suffix)])
+            current = str_tokens[b][p]
+            prefix_list.append(prefix)
+            suffix_list.append(suffix)
+            context.append(f"{prefix}|{current}|{suffix}")
+            batch.append(b)
+            pos.append(p)
+            label.append(f"{b}/{p}")
+    # print(len(batch), len(pos), len(context), len(label))
+    return pd.DataFrame(dict(
+        str_tokens=list_flatten(str_tokens),
+        unique_token=list_flatten(unique_token),
+        context=context,
+        prefix=prefix_list,
+        suffix=suffix_list,
+        batch=batch,
+        pos=pos,
+        label=label,
+    ))
+
+SPACE = "·"
+NEWLINE="↩"
+TAB = "→"
+
+
+def process_token(s):
+    if isinstance(s, t.Tensor):
+        s = s.item()
+    if isinstance(s, np.int64):
+        s = s.item()
+    if isinstance(s, int):
+        s = model.to_string(s)
+    s = s.replace(" ", SPACE)
+    s = s.replace("\n", NEWLINE+"\n")
+    s = s.replace("\t", TAB)
+    return s
+
+def process_tokens(l):
+    if isinstance(l, str):
+        l = model.to_str_tokens(l)
+    elif isinstance(l, t.Tensor) and len(l.shape)>1:
+        l = l.squeeze(0)
+    return [process_token(s) for s in l]
+
+def process_tokens_index(l):
+    if isinstance(l, str):
+        l = model.to_str_tokens(l)
+    elif isinstance(l, t.Tensor) and len(l.shape)>1:
+        l = l.squeeze(0)
+    return [f"{process_token(s)}/{i}" for i,s in enumerate(l)]
+
+def create_vocab_df(logit_vec, make_probs=False, full_vocab=None):
+    if full_vocab is None:
+        full_vocab = process_tokens(model.to_str_tokens(t.arange(model.cfg.d_vocab)))
+    vocab_df = pd.DataFrame({"token": full_vocab, "logit": utils.to_numpy(logit_vec)})
+    if make_probs:
+        vocab_df["log_prob"] = utils.to_numpy(logit_vec.log_softmax(dim=-1))
+        vocab_df["prob"] = utils.to_numpy(logit_vec.softmax(dim=-1))
+    return vocab_df.sort_values("logit", ascending=False)
+
+
+def list_flatten(nested_list):
+    return [x for y in nested_list for x in y]
+### End token_df Eoin / Neel Nanda's code ###

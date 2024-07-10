@@ -52,7 +52,7 @@ class CheckHorizon(t.nn.Module):
         horizon_bool[elevations < 0] = 0
         return horizon_bool
 
-class BalanceCheckHead(t.nn.Module):
+class BalanceCheckHead(t.nn.Module): #have this be a head that finds the minimum elevation.
     """ Checks to see if the balance has been violated previously in the sequence. """
     def forward(
         self, 
@@ -60,7 +60,10 @@ class BalanceCheckHead(t.nn.Module):
         elevation_check: Bool[t.Tensor, "batch seq"]
     ) -> Bool[t.Tensor, "batch seq"]:
         both_checks = horizon_check*elevation_check
-        return t.cumprod(both_checks, dim=1).bool()
+        return t.cumprod(both_checks, dim=1).bool() # Can the attention head do this, or can it just find out 
+
+#TODO: add MLP operation for doing the product above (AND)
+# MLP checks if min ele < 0 and whether elevation == 0
 
 class HighLevelParensBalanceChecker(HookedRootModule):
     """

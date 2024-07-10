@@ -183,24 +183,24 @@ class ModelTrainerSIIT:
             raise NotImplementedError()
 
         optimizer = t.optim.AdamW(self.ll_model.parameters(), lr=1e-3, **optim_kwargs)
-                
+        metrics = {
+            "train_loss" : [],
+            "train_baseline_loss" : [],
+            "train_iit_loss" : [],
+            "train_siit_loss" : [],
+            "test_loss" : [],
+            "test_baseline_loss" : [],
+            "test_iit_loss" : [],
+            "test_siit_loss" : [],
+            "train_IIA" : [],
+            "test_IIA" : [],
+        }
         # Training loop
         for epoch in range(epochs):
             print(f"Epoch {epoch + 1}/{epochs}")
             self.ll_model.train()  # Set the model to training mode
             
-            metrics = {
-                "train_loss" : [],
-                "train_baseline_loss" : [],
-                "train_iit_loss" : [],
-                "train_siit_loss" : [],
-                "test_loss" : [],
-                "test_baseline_loss" : [],
-                "test_iit_loss" : [],
-                "test_siit_loss" : [],
-                "train_IIA" : [],
-                "test_IIA" : [],
-            }
+            
             train_progress_bar = tqdm(zip(*self.train_dataloaders), desc="Training", leave=False)
             for b, s in train_progress_bar:
                 optimizer.zero_grad()
@@ -282,11 +282,11 @@ class ModelTrainerSIIT:
                     
                     val_progress_bar.set_postfix(loss=loss.item())
             
-                metrics['test_loss'] = measures[0] / n_iters
-                metrics['test_baseline_loss'] = measures[1] / n_iters
-                metrics['test_iit_loss'] = measures[2] / n_iters
-                metrics['test_siit_loss'] = measures[3] / n_iters
-                metrics['test_IIA'] = measures[4] / n_iters
+                metrics['test_loss'].append(measures[0] / n_iters)
+                metrics['test_baseline_loss'].append(measures[1] / n_iters)
+                metrics['test_iit_loss'].append(measures[2] / n_iters)
+                metrics['test_siit_loss'].append(measures[3] / n_iters)
+                metrics['test_IIA'].append(measures[4] / n_iters)
 
         return metrics
         
