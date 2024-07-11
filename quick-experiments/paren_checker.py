@@ -5,6 +5,7 @@ from typing import Optional, Callable, Tuple
 import torch as t
 import numpy as np
 from datasets import Dataset
+from tqdm.notebook import tqdm
 
 from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, decoders, trainers
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
@@ -14,9 +15,9 @@ from transformers import PreTrainedTokenizerFast
 from iit.utils.correspondence import Correspondence, HLNode, LLNode
 from iit.utils.index import Ix
 
-class ElevationHead(t.nn.Module):
-    """ Calculates the elevation at each position in the context"""
-    
+class LeftParenCountHead(t.nn.Module):
+    """ Calculates how many left parens are in the series up to this token """
+
     def forward(self, tokens: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch seq"]:
         """ Vocabulary:
                 0 - [START]
@@ -26,15 +27,41 @@ class ElevationHead(t.nn.Module):
         """
         #tok_clone is 1 for ( and -1 for )
         tok_clone = tokens.clone()
-        tok_clone[tok_clone == 1] = -1 #)
-        tok_clone[tok_clone == 0] = 1 #(
-        tok_clone[tok_clone == 2] = 0 #pad
-        tok_clone[tok_clone == 3] = 0 #bos
+        tok_clone[tok_clone == 0] = 5 #(
+        tok_clone[tok_clone != 5] = 0 #), pad, bos
+        tok_clone[tok_clone == 5] = 1 #(
 
         #we'll count left to right.
-        elevation = t.cumsum(tok_clone, dim=1).to(int)
+        lefts = t.cumsum(tok_clone, dim=1).to(int)
 
-        return elevation
+        return lefts
+
+class RightParenCountHead(t.nn.Module):
+    """ Calculates how many right parens are in the series up to this token """
+
+    def forward(self, tokens: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch seq"]:
+        """ Vocabulary:
+                0 - [START]
+                1 - (
+                2 - )
+                3 - [PAD]
+        """
+        #tok_clone is 1 for ( and -1 for )
+        tok_clone = tokens.clone()
+        tok_clone[tok_clone == 1] = 1 #)
+        tok_clone[tok_clone != 1] = 0 #(, pad, bos
+
+        #we'll count left to right.
+        rights = t.cumsum(tok_clone, dim=1).to(int)
+
+        return rights
+
+
+class ElevationCalculator(t.nn.Module):
+    """ Calculates the elevation at each position in the context"""
+    
+    def forward(self, lefts: Int[t.Tensor, "batch seq"], rights: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch seq"]:
+        return lefts - rights
 
 class CheckElevation(t.nn.Module):
     """ Checks if the elevation in token position -1 is 0.
@@ -85,7 +112,11 @@ class HighLevelParensBalanceChecker(HookedRootModule):
     def __init__(self, device='cpu'):
         super().__init__()
         self.input_hook = HookPoint()
-        self.elevation_head = ElevationHead()
+        self.left_paren_head = LeftParenCountHead()
+        self.left_paren_hook = HookPoint()
+        self.right_paren_head = RightParenCountHead()
+        self.right_paren_hook = HookPoint()
+        self.elevation_calc = ElevationCalculator()
         self.elevation_hook = HookPoint()
         self.elevation_checker = CheckElevation()
         self.elevation_check_hook = HookPoint()
@@ -100,7 +131,9 @@ class HighLevelParensBalanceChecker(HookedRootModule):
 
     def forward(self, tokens: Int[t.Tensor, "batch seq"]) -> Float[t.Tensor, "batch seq"]:
         tokens = self.input_hook(tokens)
-        elevation = self.elevation_hook(self.elevation_head(tokens))
+        lefts = self.left_paren_hook(self.left_paren_head(tokens))
+        rights = self.right_paren_hook(self.right_paren_head(tokens))
+        elevation = self.elevation_hook(self.elevation_calc(lefts, rights))
         ele_check = self.elevation_check_hook(self.elevation_checker(elevation))
         hor_check = self.horizon_check_hook(self.horizon_checker(elevation))
         hor_lookback = self.horizon_lookback_hook(self.horizon_lookback_head(hor_check))
@@ -117,7 +150,7 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
     """
     #Get HookedTransformer
     cfg = HookedTransformerConfig(
-        n_layers = 2,
+        n_layers = 3,
         d_model = 16,
         n_ctx = n_ctx,
         d_head = 8,
@@ -132,11 +165,13 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
     hor_neurons = t.arange(cfg.d_model*2, cfg.d_model*4).int()
     corr = {
         'input_hook' :           [('blocks.0.hook_resid_pre', Ix[[None]],                None)],
-        'elevation_hook' :       [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
-        'elevation_check_hook' : [('blocks.0.mlp.hook_post',  Ix[[None]],                ele_neurons)],
-        'horizon_check_hook' :   [('blocks.0.mlp.hook_post',  Ix[[None]],                hor_neurons)], 
-        'horizon_lookback_hook' :   [('blocks.1.attn.hook_z', Ix[[None, None, 1, None]], None)],
-        'balance_check_hook' : [('blocks.1.mlp.hook_post',    Ix[[None]],                None)]
+        'left_paren_hook':       [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
+        'right_paren_hook':      [('blocks.0.attn.hook_z',    Ix[[None, None, 1, None]], None)],
+        'elevation_hook' :       [('blocks.0.mlp.hook_post',  Ix[[None]],                None)],
+        'elevation_check_hook' : [('blocks.1.mlp.hook_post',  Ix[[None]],                ele_neurons)],
+        'horizon_check_hook' :   [('blocks.1.mlp.hook_post',  Ix[[None]],                hor_neurons)], 
+        'horizon_lookback_hook': [('blocks.2.attn.hook_z',    Ix[[None, None, 1, None]], None)],
+        'balance_check_hook' :   [('blocks.2.mlp.hook_post',    Ix[[None]],                None)]
     }
     corr_node_dict = {}
     for hk, lks in corr.items():
@@ -148,8 +183,9 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
     #Get unused nodes
     #TODO: We could further restrict computation subspaces, and this code doesn't allow for that.
     unused_model_labels = [
-        ('blocks.0.attn.hook_z', [1]), 
         ('blocks.1.attn.hook_z', [0]), 
+        ('blocks.1.attn.hook_z', [1]), 
+        ('blocks.2.attn.hook_z', [0]),
     ]
     unused_hook_nodes = []
     for label in unused_model_labels:
@@ -177,6 +213,18 @@ def test_HL_parens_components():
         [3, 0, 0, 0, 0, 0, 1, 1, 1, 2, 2],
         [3, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
         [3, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+    ]
+    true_lefts = [
+        [ 0,  1,  1,  2,  2,  3,  3,  3,  3,  3,  3],
+        [ 0,  1,  2,  3,  4,  5,  5,  5,  5,  5,  5],
+        [ 0,  0,  1,  1,  2,  2,  3,  3,  4,  4,  5],
+        [ 0,  1,  1,  2,  2,  3,  3,  4,  4,  5,  5]
+    ]
+    true_rights = [
+        [ 0,  0,  1,  1,  2,  2,  3,  3,  3,  3,  3],
+        [ 0,  0,  0,  0,  0,  0,  1,  2,  3,  3,  3],
+        [ 0,  1,  1,  2,  2,  3,  3,  4,  4,  5,  5],
+        [ 0,  0,  1,  1,  2,  2,  3,  3,  4,  4,  5]
     ]
     true_elevations = [
         [ 0,  1,  0,  1,  0,  1,  0,  0,  0,  0,  0],
@@ -209,6 +257,8 @@ def test_HL_parens_components():
         [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True]
     ]
     tokens = t.Tensor(tokens).to(int)
+    true_lefts = t.Tensor(true_lefts).to(int)
+    true_rights = t.Tensor(true_rights).to(int)
     true_elevations = t.Tensor(true_elevations).to(int)
     true_ele_check = t.Tensor(true_ele_check).to(bool)
     true_hor_check = t.Tensor(true_hor_check).to(bool)
@@ -217,12 +267,14 @@ def test_HL_parens_components():
 
     balance_checker = HighLevelParensBalanceChecker()
     balanced, cache = balance_checker.run_with_cache(tokens)
-    assert t.allclose(balanced, true_balance_check.float())
+    assert t.allclose(cache['left_paren_hook'], true_lefts)
+    assert t.allclose(cache['right_paren_hook'], true_rights)
     assert t.allclose(cache['elevation_hook'], true_elevations)
     assert t.allclose(cache['elevation_check_hook'], true_ele_check)
     assert t.allclose(cache['horizon_check_hook'], true_hor_check)
     assert t.allclose(cache['horizon_lookback_hook'], true_hor_lookback)
     assert t.allclose(cache['balance_check_hook'], true_balance_check)
+    assert t.allclose(balanced, true_balance_check.float())
     print("All tests passed!")
 
 class ParensDatasetBase(ABC):
@@ -317,7 +369,8 @@ class BalancedParensDataset(ParensDatasetBase):
         #Look for balanced subsets of each of the generated samples and store those.
         new_strings = []
         pads = np.ones_like(samples[0,:])*2
-        for sample in samples:
+        sample_progress_bar = tqdm(samples, desc=f"Finding sample substrings", leave=False, position=0)
+        for sample in sample_progress_bar:
             for i in range(2, sample.size):
                 if i % 2 == 1: 
                     continue
@@ -327,6 +380,7 @@ class BalancedParensDataset(ParensDatasetBase):
                     new = np.copy(pads)
                     new[:i] = sample[:i]
                     new_strings.append(new)
+        sample_progress_bar.close()
         all_samples = np.concatenate((samples, np.stack(new_strings)), axis=0)
         all_samples = np.unique(all_samples, axis=0) #just keep unique samples
 

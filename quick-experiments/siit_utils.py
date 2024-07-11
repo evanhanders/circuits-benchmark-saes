@@ -6,7 +6,7 @@ from datasets import Dataset
 
 import torch as t
 from torch.utils.data import DataLoader, TensorDataset
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 
 from transformer_lens import ActivationCache, HookedTransformer
 from transformer_lens.hook_points import HookPoint, HookedRootModule
@@ -159,16 +159,24 @@ class ModelTrainerSIIT:
         self, 
         b_input : Int[t.Tensor, "batch n_ctx"], 
         b_label : Float[t.Tensor, "batch"], 
-        ll_cache : ActivationCache
+        ll_cache : ActivationCache,
+        sampling_mode : str = 'sample_all' #or 'individual', 'all'
     ) -> Float[t.Tensor, '']:
         # Sample a hook from the unused ones
-        #TODO: Try different sampling techniques here.
-        siit_node = self.unused_nodes[t.randint(0, len(self.unused_nodes), (1,)).item()]
-
-        siit_hook_fn = make_ll_ablation_hook(siit_node, ll_cache)
-        siit_output = self.ll_model.run_with_hooks(b_input, fwd_hooks=[
-            (siit_node.name, siit_hook_fn)
-        ])
+        if sampling_mode == 'individual':
+            siit_node = self.unused_nodes[t.randint(0, len(self.unused_nodes), (1,)).item()]
+            nodes = [siit_node,]
+        elif sampling_mode == 'sample_all':
+            importance = t.randint(0, 2, (len(self.unused_nodes),)).to(bool).tolist()
+            nodes = [node for node, imp in zip(self.unused_nodes, importance) if imp]
+        elif sampling_mode == 'all':
+            nodes = self.unused_nodes
+        else:
+            raise ValueError(f"Unexpected SIIT sampling mode: {sampling_mode}")
+        hooks = []
+        for node in nodes:
+            hooks.append((node.name, make_ll_ablation_hook(node, ll_cache)))
+        siit_output = self.ll_model.run_with_hooks(b_input, fwd_hooks=hooks)
         siit_loss = self.loss_fn(siit_output, b_label)
         return siit_loss
         
@@ -196,12 +204,12 @@ class ModelTrainerSIIT:
             "test_IIA" : [],
         }
         # Training loop
-        for epoch in range(epochs):
-            print(f"Epoch {epoch + 1}/{epochs}")
+        epoch_progress_bar = tqdm(range(epochs), desc=f"Epoch 1/{epochs}", leave=True, position=0)
+        for epoch in epoch_progress_bar:
             self.ll_model.train()  # Set the model to training mode
             
             
-            train_progress_bar = tqdm(zip(*self.train_dataloaders), desc="Training", leave=False)
+            train_progress_bar = tqdm(zip(*self.train_dataloaders), desc="Training", leave=False, total=len(self.train_dataloaders[0]), position=1)
             for b, s in train_progress_bar:
                 optimizer.zero_grad()
 
@@ -217,7 +225,7 @@ class ModelTrainerSIIT:
                 ##########
                 #SIIT loss 
                 ##########
-                siit_loss = self.get_siit_loss(b[0], b[1].float().to(self.device), ll_cache)
+                siit_loss = self.get_siit_loss(b[0], b[1].float().to(self.device), ll_cache, sampling_mode='all')
         
                 ####################
                 # Behavior loss
@@ -240,14 +248,15 @@ class ModelTrainerSIIT:
                 loss.backward()
                 optimizer.step()
         
-                train_progress_bar.set_postfix(loss=loss.item())
+                train_progress_bar.set_postfix(loss=f'{loss.item():.2e}', iia=f'{iia.item():.3f}')
+                # train_progress_bar.update(1)
+            train_progress_bar.close()
             
         
             # Evaluation phase
             self.ll_model.eval() 
             with t.no_grad():  # Don't compute gradients during evaluation
-                
-                val_progress_bar = tqdm(zip(*self.test_dataloaders), desc="Validation", leave=False)
+                val_progress_bar = tqdm(zip(*self.test_dataloaders), desc="Testing", leave=False, total=len(self.test_dataloaders[0]), position=1)
                 measures = [0]*5
                 n_iters = 0
                 for batch, s in val_progress_bar:
@@ -280,14 +289,20 @@ class ModelTrainerSIIT:
                     measures[4] += iia.item()
                     n_iters += 1
                     
-                    val_progress_bar.set_postfix(loss=loss.item())
+                    val_progress_bar.set_postfix(loss=f'{loss.item():.2e}', iia=f'{iia.item():.3f}')
+                    # val_progress_bar.update(1)
             
                 metrics['test_loss'].append(measures[0] / n_iters)
                 metrics['test_baseline_loss'].append(measures[1] / n_iters)
                 metrics['test_iit_loss'].append(measures[2] / n_iters)
                 metrics['test_siit_loss'].append(measures[3] / n_iters)
                 metrics['test_IIA'].append(measures[4] / n_iters)
+                val_progress_bar.close()
+            # epoch_progress_bar.update(1)
+            epoch_progress_bar.set_postfix(test_loss=metrics['test_loss'][-1], test_IIA=metrics['test_IIA'][-1])
+            epoch_progress_bar.set_description(f"Epoch {epoch+2}/{epochs}")
 
+        epoch_progress_bar.close()
         return metrics
         
         
