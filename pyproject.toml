@@ -19,7 +19,7 @@ dependencies = [
     "torch",
     "transformers",
     "transformer_lens",
-    "sae_lens",
+    "sae_lens==3.12.1",
     "triton",
     "mamba_lens @ git+https://github.com/Phylliida/MambaLens.git",
     # format/CI
