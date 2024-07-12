@@ -314,7 +314,11 @@ class ModelTrainerSIIT:
                     # Behavior loss
                     ####################
                     outputs = self.ll_model(inputs)
-                    loss = self.loss_fn(outputs, labels.to(self.device))
+                    baseline_loss = self.loss_fn(outputs, labels.to(self.device))
+
+                    loss = self.baseline_weight*baseline_loss \
+                        + self.iit_weight*iit_loss \
+                        + self.siit_weight*siit_loss
 
                     measures[0] += loss.item()
                     measures[1] += baseline_loss.item()
@@ -323,7 +327,7 @@ class ModelTrainerSIIT:
                     measures[4] += iia.item()
                     n_iters += 1
                     
-                    val_progress_bar.set_postfix(loss=f'{loss.item():.2e}', iia=f'{iia.item():.3f}')
+                    val_progress_bar.set_postfix(loss=f'{loss.item():.2e}', baseline_loss=f'{baseline_loss.item():.2e}', iia=f'{iia.item():.3f}')
                     # val_progress_bar.update(1)
             
                 metrics['test_loss'].append(measures[0] / n_iters)

@@ -309,129 +309,167 @@ class BalancedParensDataset(ParensDatasetBase):
     ):
         np.random.seed(seed)
         super().__init__(N_samples, n_ctx)
+        
+    def _generate_balanced_tokens(self, N_samples, n_ctx):
+        assert n_ctx % 2 == 0, "n_ctx must be even."
+        
+        remaining_samples = N_samples
+        good_samples = []
+        while remaining_samples > 0:
+            generated_samples = min(N_samples, 1000)
+    
+            # Step 1: Generate +1 and -1 tensors
+            pos_ones = t.ones((generated_samples, n_ctx // 2))
+            neg_ones = -t.ones((generated_samples, n_ctx // 2))
+            
+            # Step 2: Join tensors
+            combined = t.cat((pos_ones, neg_ones), dim=1)
+            
+            # Step 3: Generate (N_samples, n_ctx) list of indices for shuffling
+            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
+            shuffled = t.gather(combined, 1, indices)
+            
+            # Step 4: Compute cumulative sum
+            cumsum = t.cumsum(shuffled, dim=1)
+            
+            # Step 5: Compute minimum along dim=1
+            min_values, _ = t.min(cumsum, dim=1)
+            
+            # Step 6: Create boolean mask
+            mask = min_values >= 0
+            
+            # Keep only the balanced tensors
+            balanced_tensors = shuffled[mask,:]
+            
+            good_samples.append(balanced_tensors[:remaining_samples])
+            remaining_samples -= good_samples[-1].shape[0]
+        return t.unique(t.cat(good_samples, dim=0), dim=0)
+
+    def _generate_elevation_failures(self, N_samples, n_ctx):
+        """ Samples that fail the elevation test but pass balance test """
+        assert n_ctx % 2 == 0, "n_ctx must be even."
+        
+        generated_samples = min(N_samples, 1000)
+        remaining_samples = N_samples
+        good_samples = []
+        while remaining_samples > 0:
+            # Generate +1 and -1 tensors so we ensure balance.
+            pos_ones = t.ones((generated_samples, n_ctx // 2))
+            neg_ones = -t.ones((generated_samples, n_ctx // 2))
+            combined = t.cat((pos_ones, neg_ones), dim=1)
+            
+            # shuffle
+            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
+            shuffled = t.gather(combined, 1, indices)
+
+            # create random elevations
+            elevation = t.cumsum(shuffled, dim=1)
+            min_values, _ = t.min(elevation, dim=1)
+            
+            mask = min_values < 0
+            negative_results = shuffled[mask,:]
+            good_samples.append(negative_results[:remaining_samples])
+            remaining_samples -= good_samples[-1].shape[0]
+            
+        return t.unique(t.cat(good_samples, dim=0), dim=0)
+        
+    def _generate_balance_failures(self, N_samples, n_ctx):
+        """ Samples that fail the balance test but pass elevation test """
+        assert n_ctx % 2 == 0, "n_ctx must be even."
+        
+        generated_samples = min(N_samples, 1000)
+        remaining_samples = N_samples
+        good_samples = []
+        while remaining_samples > 0:
+            # Generate +1 and -1 tensors so we ensure imbalance
+            # There's def a smarter way to do this with just generating the ones and then indexing.
+            pos_lengths = n_ctx//2 + t.randint(1, n_ctx // 2 + 1, (generated_samples,))
+            neg_lengths = n_ctx - pos_lengths
+            samples = [ t.cat((
+                t.ones((p)),
+                -t.ones((n))
+            )) for p, n in zip(pos_lengths, neg_lengths)]
+            samples = t.stack(samples)
+            
+            # shuffle
+            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
+            shuffled = t.gather(samples, 1, indices)
+
+            # create random elevations
+            elevation = t.cumsum(shuffled, dim=1)
+            min_values, _ = t.min(elevation, dim=1)
+            
+            mask = min_values >= 0
+            elevation_passes = shuffled[mask,:]
+            good_samples.append(elevation_passes[:remaining_samples])
+            remaining_samples -= good_samples[-1].shape[0]
+            
+        return t.unique(t.cat(good_samples, dim=0), dim=0)
+        
+    def _generate_absolute_failures(self, N_samples, n_ctx):
+        """ Samples that fail both tests """
+        assert n_ctx % 2 == 0, "n_ctx must be even."
+        
+        generated_samples = min(N_samples, 1000)
+        remaining_samples = N_samples
+        good_samples = []
+        while remaining_samples > 0:
+            # Generate +1 and -1 tensors so we ensure imbalance
+            # There's def a smarter way to do this with just generating the ones and then indexing.
+            coin_flip = t.randint(0, 2, (generated_samples,))
+            #Generate all from 0 - n_ctx//2 - 1
+            pos_lengths = t.randint(0, n_ctx//2, (generated_samples,))
+            #use coin flip to flip half to range n_ctx//2 + 1 -> n_ctx
+            pos_lengths[coin_flip == 0] = t.randint(n_ctx//2 + 1, n_ctx, ((coin_flip == 0).sum(),))
+            neg_lengths = n_ctx - pos_lengths
+            samples = [ t.cat((
+                t.ones((p)),
+                -t.ones((n))
+            )) for p, n in zip(pos_lengths, neg_lengths)]
+            samples = t.stack(samples)
+            
+            # shuffle
+            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
+            shuffled = t.gather(samples, 1, indices)
+
+            # create random elevations
+            elevation = t.cumsum(shuffled, dim=1)
+            min_values, _ = t.min(elevation, dim=1)
+            
+            mask = min_values < 0
+            elevation_fails = shuffled[mask,:]
+            good_samples.append(elevation_fails[:remaining_samples])
+            remaining_samples -= good_samples[-1].shape[0]
+            
+        return t.unique(t.cat(good_samples, dim=0), dim=0)
+        
 
     def generate_tokens(self):
-        # generate a bunch of tokens of the correct context length
-        #empirically if we want ~20_000 balanced samples we need ~25_000 initial samples.
-        # (assuming context is long enough)
-        N = int(self.N_samples * 5 / 4) 
-        first = np.random.binomial(1, 0.25, (N, 1))
-        rest = np.random.binomial(1, 0.5, (N, self.n_ctx - 3)) #account for bos, pad, and first paren
-        samples = np.concatenate([first, rest], axis=1)
-            
-        #Look for balanced subsets of each of the generated samples and store those.
-        new_strings = []
-        pads = np.ones_like(samples[0,:])*2
-        sample_progress_bar = tqdm(samples, desc=f"Finding sample substrings", leave=False, position=0)
-        for sample in sample_progress_bar:
-            for i in range(2, sample.size):
-                if i % 2 == 1: 
-                    continue
-                if self.passes_test(sample[:i])\
-                or ((not self.passes_elevation(sample[:i])) and self.passes_balance(sample[:i]))\
-                or ((not self.passes_balance(sample[:i])) and self.passes_elevation(sample[:i])):
-                    new = np.copy(pads)
-                    new[:i] = sample[:i]
-                    new_strings.append(new)
-        sample_progress_bar.close()
-        all_samples = np.concatenate((samples, np.stack(new_strings)), axis=0)
-        all_samples = np.unique(all_samples, axis=0) #just keep unique samples
 
-        #Label each sample:
-        # 0 - passes no test
-        # 1 - passes all test
-        # 2 - passes balance; fails elevation
-        # 3 - passes elevation; fails balance
-        markers = np.zeros(all_samples.shape[0])
-        for i,sample in enumerate(all_samples):
-            if self.passes_test(sample):
-                markers[i] = 1
-            elif (not self.passes_elevation(sample)) and self.passes_balance(sample):
-                markers[i] = 2
-            elif (not self.passes_balance(sample)) and self.passes_elevation(sample):
-                markers[i] = 3
+        #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
+        balanced = self._generate_balanced_tokens(self.N_samples, self.n_ctx - 2)
+        fail_ele = self._generate_elevation_failures(self.N_samples // 2, self.n_ctx - 2)
+        fail_bal = self._generate_balance_failures(self.N_samples // 2, self.n_ctx - 2)
+        fail_both = self._generate_absolute_failures(self.N_samples // 2, self.n_ctx - 2)
 
-        # Figure out which label has the fewest number of samples; dataset will be 4x that many.
-        unique_labels, counts = np.unique(markers, return_counts=True)
-        min_count = np.min(counts)
-
-        #make sure we have all 4 types
-        if len(unique_labels) < 4:
-            
-            new_samples = []
-            if 2 not in unique_labels:
-                pass_indices  = np.array(np.where(markers == 1)[0], dtype=int)
-                #make min_count copies of items from label 1 but ruin the elevation while preserving balance.
-                for i in range(min_count):
-                    idx = np.random.choice(len(pass_indices))
-                    this_sample = all_samples[pass_indices[idx]]
-                    pass_indices = np.delete(pass_indices, idx)
-                    # swap a ( and a )
-                    while self.passes_elevation(this_sample):
-                        zero_spots = np.array(np.where(this_sample == 0)[0], dtype=int)
-                        zero_idx = zero_spots[np.random.choice(len(zero_spots))]
-                        one_spots = np.array(np.where(this_sample == 1)[0], dtype=int)
-                        one_idx = one_spots[np.random.choice(len(one_spots))]
-                        this_sample[zero_idx] = 1
-                        this_sample[one_idx] = 0
-                    new_samples.append(this_sample)
-            if 3 not in unique_labels:
-                pass_indices  = np.array(np.where(markers == 1)[0], dtype=int)
-                #make min_count copies of items from label 1 but ruin the balance while keeping elevation.
-                for i in range(min_count):
-                    idx = np.random.choice(len(pass_indices))
-                    this_sample = all_samples[pass_indices[idx]]
-                    pass_indices = np.delete(pass_indices, idx)
-                    # turn a ) into a (
-                    zero_spots = np.array(np.where(this_sample == 1)[0], dtype=int)
-                    idx = np.random.choice(len(zero_spots))
-                    this_sample[idx] = 0
-                    new_samples.append(this_sample)
-            #update samples and markers
-            all_samples = np.concatenate((all_samples, np.stack(new_samples)), axis=0)
-            all_samples = np.unique(all_samples, axis=0) #just keep unique samples
-    
-            markers = np.zeros(all_samples.shape[0])
-            for i,sample in enumerate(all_samples):
-                if self.passes_test(sample):
-                    markers[i] = 1
-                elif (not self.passes_elevation(sample)) and self.passes_balance(sample):
-                    markers[i] = 2
-                elif (not self.passes_balance(sample)) and self.passes_elevation(sample):
-                    markers[i] = 3
-    
-            # Figure out which label has the fewest number of samples; dataset will be 4x that many.
-            unique_labels, counts = np.unique(markers, return_counts=True)
-            min_count = np.min(counts)
-
+        dataset = t.cat([
+            balanced[:self.N_samples // 2],
+            fail_ele[:self.N_samples // 6 + 1],
+            fail_bal[:self.N_samples // 6 + 1],
+            fail_both[:self.N_samples // 6]
+        ], dim = 0)
+        dataset[dataset == 1]  = 0 #(
+        dataset[dataset == -1] = 1 #)
+        dataset = dataset[t.randperm(dataset.shape[0]),:] #shuffle the dataset.
         
-        # Initialize a list to store the sampled indices
-        sampled_indices = []
-        
-        # For each label, shuffle the indices and select the first min_count elements
-        for label in unique_labels:
-            indices = np.where(markers == label)[0]
-            np.random.shuffle(indices)
-            sampled_indices.append(indices[:min_count])
 
-        samples = np.concatenate([all_samples[idx] for idx in sampled_indices], axis=0)
-        
-        #verification that dataset is balanced
-        new_markers = np.zeros(samples.shape[0])
-        for i,sample in enumerate(samples):
-            if self.passes_test(sample):
-                new_markers[i] = 1
-            elif (not self.passes_elevation(sample)) and self.passes_balance(sample):
-                new_markers[i] = 2
-            elif (not self.passes_balance(sample)) and self.passes_elevation(sample):
-                new_markers[i] = 3
-                
-        new_unique_labels, new_counts = np.unique(new_markers, return_counts=True)
-        for count in new_counts:
-            assert count == min_count
 
-        #add BOS token
-        self.tokens = np.concatenate([3*np.ones((samples.shape[0], 1)), samples, 2*np.ones((samples.shape[0], 1))], axis=1).astype(int)
+        #add BOS token to beginning and pad to end
+        self.tokens = np.concatenate([
+            3*np.ones((dataset.shape[0], 1)), 
+            dataset, 
+            2*np.ones((dataset.shape[0], 1))
+        ], axis=1).astype(int)
 
 class SequentialParensDataset(ParensDatasetBase):
     def __init__(
