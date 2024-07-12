@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Tuple, Callable
+from typing import Tuple, Callable, Set
 from jaxtyping import Int, Float
 
 from datasets import Dataset
@@ -10,7 +10,7 @@ from tqdm.notebook import tqdm
 
 from transformer_lens import ActivationCache, HookedTransformer
 from transformer_lens.hook_points import HookPoint, HookedRootModule
-from iit.utils.correspondence import LLNode, Correspondence
+from iit.utils.correspondence import HLNode, LLNode, Correspondence
 
 def build_traintest_dataloaders(
     dataset: Dataset, 
@@ -125,11 +125,44 @@ class ModelTrainerSIIT:
         self, 
         b_input : Int[t.Tensor, "batch n_ctx"], 
         hl_cache : ActivationCache, 
+        ll_cache : ActivationCache,
+        testing : bool = False
+    ) -> Tuple[Float[t.Tensor, ''], Float[t.Tensor, '']]:
+        if not testing:
+            # sample one of the operations to do the intervention on:
+            hl_node = self.corr_keys[t.randint(0, len(self.corr_keys), (1,)).item()]
+            ll_nodes = self.corr[hl_node]
+            return self._calculate_single_iit_loss(
+                hl_node,
+                ll_nodes,
+                b_input,
+                hl_cache,
+                ll_cache
+            )
+        else:
+            running_loss, running_iia = 0, 0
+            for hl_node in list(self.corr_keys):
+                ll_nodes = self.corr[hl_node]
+                loss, iia = self._calculate_single_iit_loss(
+                    hl_node,
+                    ll_nodes,
+                    b_input,
+                    hl_cache,
+                    ll_cache
+                )
+                running_loss += loss
+                running_iia += iia
+            N = len(list(self.corr_keys))
+            return running_loss/N, running_iia/N
+
+    def _calculate_single_iit_loss(
+        self,
+        hl_node : HLNode,
+        ll_nodes : Set[LLNode],
+        b_input : Int[t.Tensor, "batch n_ctx"], 
+        hl_cache : ActivationCache, 
         ll_cache : ActivationCache
     ) -> Tuple[Float[t.Tensor, ''], Float[t.Tensor, '']]:
-        # sample one of the operations to do the intervention on:
-        hl_node = self.corr_keys[t.randint(0, len(self.corr_keys), (1,)).item()]
-        ll_nodes = self.corr[hl_node]
         
         #run the intervention on the Hl model doing a forward pass with b
         hl_hook_fn = partial(HL_interchange_intervention, cache=hl_cache)
@@ -185,12 +218,13 @@ class ModelTrainerSIIT:
         self, 
         epochs: int, 
         use_wandb: bool = False, 
+        lr : float = 1e-3,
         **optim_kwargs
     ) -> dict:
         if use_wandb:
             raise NotImplementedError()
 
-        optimizer = t.optim.AdamW(self.ll_model.parameters(), lr=1e-3, **optim_kwargs)
+        optimizer = t.optim.AdamW(self.ll_model.parameters(), lr=lr, **optim_kwargs)
         metrics = {
             "train_loss" : [],
             "train_baseline_loss" : [],
@@ -269,7 +303,7 @@ class ModelTrainerSIIT:
                     ##########
                     #IIT loss 
                     ##########      
-                    iit_loss, iia = self.get_iit_loss(inputs, hl_cache, ll_cache)
+                    iit_loss, iia = self.get_iit_loss(inputs, hl_cache, ll_cache, testing=True)
             
                     ##########
                     #SIIT loss 
@@ -300,6 +334,9 @@ class ModelTrainerSIIT:
                 val_progress_bar.close()
             # epoch_progress_bar.update(1)
             epoch_progress_bar.set_postfix(test_loss=metrics['test_loss'][-1], test_IIA=metrics['test_IIA'][-1])
+            if metrics['test_IIA'][-1] == 1:
+                print('reached test IIA = 1; finishing training')
+                break
             epoch_progress_bar.set_description(f"Epoch {epoch+2}/{epochs}")
 
         epoch_progress_bar.close()
