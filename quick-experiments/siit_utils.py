@@ -87,6 +87,8 @@ def make_post_ablation_hook(
             hook_point_out = keep_mask*hook_point_out + (1-keep_mask)*t.mean(ll_cache[hook.name], dim=1, keepdim=True)
         elif method == 'zero':
             hook_point_out = keep_mask*hook_point_out
+        elif method == 'shuffle':
+            hook_point_out = keep_mask*hook_point_out + (1-keep_mask)*hook_point_out[t.randperm(hook_point_out.shape[0])]
         else:
             raise ValueError(f"Unknown ablation method: {method}")
         return hook_point_out
@@ -208,10 +210,19 @@ class ModelTrainerSIIT:
             raise ValueError(f"Unexpected SIIT sampling mode: {sampling_mode}")
         hooks = []
         for node in nodes:
-            hooks.append((node.name, make_ll_ablation_hook(node, ll_cache)))
+            # hooks.append((node.name, make_ll_ablation_hook(node, ll_cache)))
+            hooks.append((node.name, make_post_ablation_hook(node, ll_cache, method='shuffle')))
         siit_output = self.ll_model.run_with_hooks(b_input, fwd_hooks=hooks)
         siit_loss = self.loss_fn(siit_output, b_label)
-        return siit_loss
+
+        #Calculate similarity of ll_output and label.
+        # This follows eqn 3 of https://arxiv.org/pdf/2112.00826
+        tol = 1e-3 # should be floating point error tolerance really
+        siit_prob = t.sigmoid(siit_output)[:,-1,-1]
+        similarity = t.abs(b_label - (siit_prob > 0.5).float()) < tol
+        wrong_answers = 1 - t.sum(similarity) / similarity.shape[0]
+        
+        return siit_loss, wrong_answers
         
 
     def train(
@@ -236,6 +247,8 @@ class ModelTrainerSIIT:
             "test_siit_loss" : [],
             "train_IIA" : [],
             "test_IIA" : [],
+            "train_siit_wrong" : [],
+            "test_siit_wrong" : [],
         }
         # Training loop
         epoch_progress_bar = tqdm(range(epochs), desc=f"Epoch 1/{epochs}", leave=True, position=0)
@@ -259,7 +272,7 @@ class ModelTrainerSIIT:
                 ##########
                 #SIIT loss 
                 ##########
-                siit_loss = self.get_siit_loss(b[0], b[1].float().to(self.device), ll_cache, sampling_mode='all')
+                siit_loss, siit_wrong = self.get_siit_loss(b[0], b[1].float().to(self.device), ll_cache)
         
                 ####################
                 # Behavior loss
@@ -278,6 +291,7 @@ class ModelTrainerSIIT:
                 metrics['train_iit_loss'].append(iit_loss.item())
                 metrics['train_siit_loss'].append(siit_loss.item())
                 metrics['train_IIA'].append(iia.item())
+                metrics['train_siit_wrong'].append(siit_wrong.item())
         
                 loss.backward()
                 optimizer.step()
@@ -291,8 +305,9 @@ class ModelTrainerSIIT:
             self.ll_model.eval() 
             with t.no_grad():  # Don't compute gradients during evaluation
                 val_progress_bar = tqdm(zip(*self.test_dataloaders), desc="Testing", leave=False, total=len(self.test_dataloaders[0]), position=1)
-                measures = [0]*5
+                measures = [0]*6
                 n_iters = 0
+                n_samples = 0
                 for batch, s in val_progress_bar:
                     
                     inputs, labels = batch
@@ -308,7 +323,7 @@ class ModelTrainerSIIT:
                     ##########
                     #SIIT loss 
                     ##########
-                    siit_loss = self.get_siit_loss(inputs, labels.float().to(self.device), ll_cache)
+                    siit_loss, siit_wrong = self.get_siit_loss(inputs, labels.float().to(self.device), ll_cache, sampling_mode='all')
             
                     ####################
                     # Behavior loss
@@ -325,9 +340,11 @@ class ModelTrainerSIIT:
                     measures[2] += iit_loss.item()
                     measures[3] += siit_loss.item()
                     measures[4] += iia.item()
+                    measures[5] += siit_wrong.item()*labels.shape[0]
                     n_iters += 1
+                    n_samples += labels.shape[0]
                     
-                    val_progress_bar.set_postfix(loss=f'{loss.item():.2e}', baseline_loss=f'{baseline_loss.item():.2e}', iia=f'{iia.item():.3f}')
+                    val_progress_bar.set_postfix(loss=f'{loss.item():.2e}', baseline_loss=f'{baseline_loss.item():.2e}', iia=f'{measures[4]/n_iters:.4f}', siit_wrong=f'{measures[5]/n_samples:.2e}')
                     # val_progress_bar.update(1)
             
                 metrics['test_loss'].append(measures[0] / n_iters)
@@ -335,11 +352,12 @@ class ModelTrainerSIIT:
                 metrics['test_iit_loss'].append(measures[2] / n_iters)
                 metrics['test_siit_loss'].append(measures[3] / n_iters)
                 metrics['test_IIA'].append(measures[4] / n_iters)
+                metrics['test_siit_wrong'].append(measures[5] / n_samples)
                 val_progress_bar.close()
             # epoch_progress_bar.update(1)
-            epoch_progress_bar.set_postfix(test_loss=metrics['test_loss'][-1], test_IIA=metrics['test_IIA'][-1])
-            if metrics['test_IIA'][-1] == 1:
-                print('reached test IIA = 1; finishing training')
+            epoch_progress_bar.set_postfix(test_loss=metrics['test_loss'][-1], test_IIA=metrics['test_IIA'][-1], test_siit_wrong=metrics['test_siit_wrong'][-1])
+            if min(metrics['test_IIA'][-3:]) == 1 and max(metrics['test_siit_wrong'][-3:]) == 0:
+                print('reached test IIA = 1 and test_siit_wrong = 0; finishing training')
                 break
             epoch_progress_bar.set_description(f"Epoch {epoch+2}/{epochs}")
 
