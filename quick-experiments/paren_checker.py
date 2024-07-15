@@ -118,7 +118,7 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
     """
     #Get HookedTransformer
     cfg = HookedTransformerConfig(
-        n_layers = 3,
+        n_layers = 2,
         d_model = 16,
         n_ctx = n_ctx,
         d_head = 8,
@@ -134,10 +134,10 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
     corr = {
         'input_hook' :           [('blocks.0.hook_resid_pre', Ix[[None]],                None)],
         'elevation_hook' :       [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
-        'elevation_check_hook' : [('blocks.1.mlp.hook_post',  Ix[[None]],                ele_neurons)],
-        'horizon_check_hook' :   [('blocks.1.mlp.hook_post',  Ix[[None]],                hor_neurons)], 
-        'horizon_lookback_hook': [('blocks.2.attn.hook_z',    Ix[[None, None, 1, None]], None)],
-        'balance_check_hook' :   [('blocks.2.mlp.hook_post',    Ix[[None]],                None)]
+        'elevation_check_hook' : [('blocks.0.mlp.hook_post',  Ix[[None]],                ele_neurons)],
+        'horizon_check_hook' :   [('blocks.0.mlp.hook_post',  Ix[[None]],                hor_neurons)], 
+        'horizon_lookback_hook': [('blocks.1.attn.hook_z',    Ix[[None, None, 1, None]], None)],
+        'balance_check_hook' :   [('blocks.1.mlp.hook_post',    Ix[[None]],                None)]
     }
     corr_node_dict = {}
     for hk, lks in corr.items():
@@ -150,10 +150,7 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
     #TODO: We could further restrict computation subspaces, and this code doesn't allow for that.
     unused_model_labels = [
         ('blocks.0.attn.hook_z', [1]),
-        'blocks.0.mlp.hook_post',
         ('blocks.1.attn.hook_z', [0]), 
-        ('blocks.1.attn.hook_z', [1]), 
-        ('blocks.2.attn.hook_z', [0]),
     ]
     unused_hook_nodes = []
     for label in unused_model_labels:
@@ -309,104 +306,8 @@ class BalancedParensDataset(ParensDatasetBase):
     ):
         np.random.seed(seed)
         super().__init__(N_samples, n_ctx)
-        
-    def _generate_balanced_tokens(self, N_samples, n_ctx):
-        assert n_ctx % 2 == 0, "n_ctx must be even."
-        
-        remaining_samples = N_samples
-        good_samples = []
-        while remaining_samples > 0:
-            generated_samples = min(N_samples, 1000)
-    
-            # Step 1: Generate +1 and -1 tensors
-            pos_ones = t.ones((generated_samples, n_ctx // 2))
-            neg_ones = -t.ones((generated_samples, n_ctx // 2))
-            
-            # Step 2: Join tensors
-            combined = t.cat((pos_ones, neg_ones), dim=1)
-            
-            # Step 3: Generate (N_samples, n_ctx) list of indices for shuffling
-            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
-            shuffled = t.gather(combined, 1, indices)
-            
-            # Step 4: Compute cumulative sum
-            cumsum = t.cumsum(shuffled, dim=1)
-            
-            # Step 5: Compute minimum along dim=1
-            min_values, _ = t.min(cumsum, dim=1)
-            
-            # Step 6: Create boolean mask
-            mask = min_values >= 0
-            
-            # Keep only the balanced tensors
-            balanced_tensors = shuffled[mask,:]
-            
-            good_samples.append(balanced_tensors[:remaining_samples])
-            remaining_samples -= good_samples[-1].shape[0]
-        return t.unique(t.cat(good_samples, dim=0), dim=0)
 
-    def _generate_elevation_failures(self, N_samples, n_ctx):
-        """ Samples that fail the elevation test but pass balance test """
-        assert n_ctx % 2 == 0, "n_ctx must be even."
-        
-        generated_samples = min(N_samples, 1000)
-        remaining_samples = N_samples
-        good_samples = []
-        while remaining_samples > 0:
-            # Generate +1 and -1 tensors so we ensure balance.
-            pos_ones = t.ones((generated_samples, n_ctx // 2))
-            neg_ones = -t.ones((generated_samples, n_ctx // 2))
-            combined = t.cat((pos_ones, neg_ones), dim=1)
-            
-            # shuffle
-            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
-            shuffled = t.gather(combined, 1, indices)
-
-            # create random elevations
-            elevation = t.cumsum(shuffled, dim=1)
-            min_values, _ = t.min(elevation, dim=1)
-            
-            mask = min_values < 0
-            negative_results = shuffled[mask,:]
-            good_samples.append(negative_results[:remaining_samples])
-            remaining_samples -= good_samples[-1].shape[0]
-            
-        return t.unique(t.cat(good_samples, dim=0), dim=0)
-        
-    def _generate_balance_failures(self, N_samples, n_ctx):
-        """ Samples that fail the balance test but pass elevation test """
-        assert n_ctx % 2 == 0, "n_ctx must be even."
-        
-        generated_samples = min(N_samples, 1000)
-        remaining_samples = N_samples
-        good_samples = []
-        while remaining_samples > 0:
-            # Generate +1 and -1 tensors so we ensure imbalance
-            # There's def a smarter way to do this with just generating the ones and then indexing.
-            pos_lengths = n_ctx//2 + t.randint(1, n_ctx // 2 + 1, (generated_samples,))
-            neg_lengths = n_ctx - pos_lengths
-            samples = [ t.cat((
-                t.ones((p)),
-                -t.ones((n))
-            )) for p, n in zip(pos_lengths, neg_lengths)]
-            samples = t.stack(samples)
-            
-            # shuffle
-            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
-            shuffled = t.gather(samples, 1, indices)
-
-            # create random elevations
-            elevation = t.cumsum(shuffled, dim=1)
-            min_values, _ = t.min(elevation, dim=1)
-            
-            mask = min_values >= 0
-            elevation_passes = shuffled[mask,:]
-            good_samples.append(elevation_passes[:remaining_samples])
-            remaining_samples -= good_samples[-1].shape[0]
-            
-        return t.unique(t.cat(good_samples, dim=0), dim=0)
-        
-    def _generate_absolute_failures(self, N_samples, n_ctx):
+    def _generate_token_subset(self, N_samples, n_ctx, passes_balance=True, passes_elevation=True):
         """ Samples that fail both tests """
         assert n_ctx % 2 == 0, "n_ctx must be even."
         
@@ -414,17 +315,21 @@ class BalancedParensDataset(ParensDatasetBase):
         remaining_samples = N_samples
         good_samples = []
         while remaining_samples > 0:
-            # Generate +1 and -1 tensors so we ensure imbalance
-            # There's def a smarter way to do this with just generating the ones and then indexing.
-            coin_flip = t.randint(0, 2, (generated_samples,))
-            #Generate all from 0 - n_ctx//2 - 1
-            pos_lengths = t.randint(0, n_ctx//2, (generated_samples,))
-            #use coin flip to flip half to range n_ctx//2 + 1 -> n_ctx
-            pos_lengths[coin_flip == 0] = t.randint(n_ctx//2 + 1, n_ctx, ((coin_flip == 0).sum(),))
-            neg_lengths = n_ctx - pos_lengths
+            if passes_balance:
+                pos_lengths = (n_ctx//2) * t.ones(generated_samples).to(int)
+                neg_lengths = pos_lengths
+            else:
+                # Generate +1 and -1 tensors so we ensure imbalance
+                # There's def a smarter way to do this with just generating the ones and then indexing.
+                coin_flip = t.randint(0, 2, (generated_samples,))
+                #Generate all from 0 - n_ctx//2 - 1
+                pos_lengths = t.randint(0, n_ctx//2, (generated_samples,))
+                #use coin flip to flip half to range n_ctx//2 + 1 -> n_ctx
+                pos_lengths[coin_flip == 0] = t.randint(n_ctx//2 + 1, n_ctx, ((coin_flip == 0).sum(),))
+                neg_lengths = n_ctx - pos_lengths
             samples = [ t.cat((
-                t.ones((p)),
-                -t.ones((n))
+                t.ones((p.item())),
+                -t.ones((n.item()))
             )) for p, n in zip(pos_lengths, neg_lengths)]
             samples = t.stack(samples)
             
@@ -436,14 +341,29 @@ class BalancedParensDataset(ParensDatasetBase):
             elevation = t.cumsum(shuffled, dim=1)
             min_values, _ = t.min(elevation, dim=1)
             
-            mask = min_values < 0
-            elevation_fails = shuffled[mask,:]
-            good_samples.append(elevation_fails[:remaining_samples])
+            # Step 6: Create appropriate mask for pass/fail on task
+            if passes_elevation:
+                mask = min_values >= 0
+            else:
+                mask = min_values < 0
+            masked_samples = shuffled[mask,:]
+            good_samples.append(masked_samples[:remaining_samples])
             remaining_samples -= good_samples[-1].shape[0]
             
         return t.unique(t.cat(good_samples, dim=0), dim=0)
         
+    def _generate_balanced_tokens(self, N_samples, n_ctx):
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_elevation=True)
 
+    def _generate_elevation_failures(self, N_samples, n_ctx):
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_elevation=False)
+        
+    def _generate_balance_failures(self, N_samples, n_ctx):
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_elevation=True)
+        
+    def _generate_absolute_failures(self, N_samples, n_ctx):
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_elevation=False)
+        
     def generate_tokens(self):
 
         #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
@@ -461,8 +381,6 @@ class BalancedParensDataset(ParensDatasetBase):
         dataset[dataset == 1]  = 0 #(
         dataset[dataset == -1] = 1 #)
         dataset = dataset[t.randperm(dataset.shape[0]),:] #shuffle the dataset.
-        
-
 
         #add BOS token to beginning and pad to end
         self.tokens = np.concatenate([
