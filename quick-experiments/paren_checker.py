@@ -15,36 +15,77 @@ from transformers import PreTrainedTokenizerFast
 from iit.utils.correspondence import Correspondence, HLNode, LLNode
 from iit.utils.index import Ix
 
-class ElevationHead(t.nn.Module):
-    """ Calculates the elevation at each position in the context"""
-    
+
+class LeftParenCountHead(t.nn.Module):
+    """ Calculates how many left parens are in the series up to this token """
+
     def forward(self, tokens: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch seq"]:
         """ Vocabulary:
-                0 - (
-                1 - )
-                2 - [PAD]
-                3 - [BOS]
+                0 - [START]
+                1 - (
+                2 - )
+                3 - [PAD]
         """
         #tok_clone is 1 for ( and -1 for )
         tok_clone = tokens.clone()
-        tok_clone[tok_clone == 1] = -1
-        tok_clone[tok_clone == 0] = 1
-        tok_clone[tok_clone == 3] = 0
-        tok_clone[tok_clone == 2] = 0
+        tok_clone[tok_clone == 0] = 5 #(
+        tok_clone[tok_clone != 5] = 0 #), pad, bos
+        tok_clone[tok_clone == 5] = 1 #(
+        tok_clone[:,1] = 0 #don't count job id token
 
         #we'll count left to right.
-        elevation = t.cumsum(tok_clone, dim=1).to(int)
+        lefts = t.cumsum(tok_clone, dim=1).to(int)
 
-        return elevation
+        return lefts
+
+class RightParenCountHead(t.nn.Module):
+    """ Calculates how many right parens are in the series up to this token """
+
+    def forward(self, tokens: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch seq"]:
+        """ Vocabulary:
+                0 - [START]
+                1 - (
+                2 - )
+                3 - [PAD]
+        """
+        #tok_clone is 1 for ( and -1 for )
+        tok_clone = tokens.clone()
+        tok_clone[tok_clone == 1] = 1 #)
+        tok_clone[tok_clone != 1] = 0 #(, pad, bos
+        tok_clone[:,1] = 0 #don't count job id token
+
+        #we'll count left to right.
+        rights = t.cumsum(tok_clone, dim=1).to(int)
+
+        return rights
+
+class ElevationCalculator(t.nn.Module):
+    """ Calculates the elevation at each position in the context"""
+    
+    def forward(self, lefts: Int[t.Tensor, "batch seq"], rights: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch seq"]:
+        return lefts - rights
+
+class EvenCheck(t.nn.Module):
+    """ Calculates if a number is even or not  """
+
+    def forward(self, measured: Int[t.Tensor, "batch seq"]) -> Bool[t.Tensor, "batch"]:
+        return ~t.remainder(measured, 2).bool()[:,-1] #true if even; false if odd.
+
+class TaskIdentifier(t.nn.Module):
+
+    def forward(self, tokens: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch"]:
+        jobs = t.zeros(tokens.shape[0]).to(int)
+        jobs[tokens[:,1] == 1] = 1 #if token in position 1 is a 1, do job 2. Else, job 1.
+        return jobs
 
 class CheckElevation(t.nn.Module):
     """ Checks if the elevation in token position -1 is 0.
         Returns 1 if so and 0 if false.
     """
 
-    def forward(self, elevations: Int[t.Tensor, "batch seq"]) -> Bool[t.Tensor, "batch seq"]:
-        elevation_bool = t.ones(elevations.shape, dtype=t.bool)
-        elevation_bool[elevations[:,-1].nonzero(), -1] = 0
+    def forward(self, elevations: Int[t.Tensor, "batch seq"]) -> Bool[t.Tensor, "batch"]:
+        elevation_bool = t.ones(elevations.shape[0], dtype=t.bool)
+        elevation_bool[elevations[:,-1].nonzero()] = 0
         return elevation_bool
 
 class CheckHorizon(t.nn.Module):
@@ -61,18 +102,35 @@ class HorizonLookbackHead(t.nn.Module): #have this be a head that finds the mini
     def forward(
         self, 
         horizon_check: Bool[t.Tensor, "batch seq"]
-    ) -> Bool[t.Tensor, "batch seq"]:
+    ) -> Bool[t.Tensor, "batch"]:
         #this basically just gives True if horizon has never been violated before or now; false if horizon has been violated
-        return t.cumprod(horizon_check, dim=1).bool() 
+        return t.cumprod(horizon_check, dim=1)[:,-1].bool() 
 
-class BalanceCheck(t.nn.Module):
-    """ Performs AND to see if balance and horizon both pass """
+class OutputChecks(t.nn.Module):
+
     def forward(
         self,
-        horizon_lookback : Bool[t.Tensor, "batch seq"],
-        elevation_check : Bool[t.Tensor, "batch seq"]
-    ):
-        return horizon_lookback * elevation_check
+        task_id : Int[t.Tensor, "batch"],
+        left_even : Bool[t.Tensor, "batch"],
+        right_even: Bool[t.Tensor, "batch"],
+        ele_check : Bool[t.Tensor, "batch"],
+        bal_check : Bool[t.Tensor, "batch"]
+    ) -> Int[t.Tensor, "batch"]:
+
+        #Calculate parens balance output
+        bal_output = t.zeros_like(task_id)
+        bal_output[ele_check*bal_check] = 1
+        bal_output[ele_check*(~bal_check)] = 2
+        bal_output[(~ele_check)*bal_check] = 3
+
+        #Calculate left / right odd-even output
+        even_output = t.zeros_like(task_id)
+        even_output[left_even*right_even] = 1
+        even_output[left_even*(~right_even)] = 2
+        even_output[(~left_even)*right_even] = 3
+
+        return t.where(task_id == 0, bal_output, even_output)       
+        
 
 class HighLevelParensBalanceChecker(HookedRootModule):
     """
@@ -85,8 +143,17 @@ class HighLevelParensBalanceChecker(HookedRootModule):
     """
     def __init__(self, device='cpu'):
         super().__init__()
+        self.task_hook = HookPoint()
+        self.task_id = TaskIdentifier()
         self.input_hook = HookPoint()
-        self.elevation_calc = ElevationHead()
+        self.left_parens = LeftParenCountHead()
+        self.left_parens_hook = HookPoint()
+        self.right_parens = RightParenCountHead()
+        self.right_parens_hook = HookPoint()
+        self.even_checker = EvenCheck()
+        self.left_even_hook = HookPoint()
+        self.right_even_hook = HookPoint()
+        self.elevation_calc = ElevationCalculator()
         self.elevation_hook = HookPoint()
         self.elevation_checker = CheckElevation()
         self.elevation_check_hook = HookPoint()
@@ -94,19 +161,26 @@ class HighLevelParensBalanceChecker(HookedRootModule):
         self.horizon_check_hook = HookPoint()
         self.horizon_lookback_head = HorizonLookbackHead()
         self.horizon_lookback_hook = HookPoint()
-        self.balance_check = BalanceCheck()
-        self.balance_check_hook = HookPoint()
+        self.output_check = OutputChecks()
+        self.output_check_hook = HookPoint()
         self.device = device
         self.setup()
 
     def forward(self, tokens: Int[t.Tensor, "batch seq"]) -> Float[t.Tensor, "batch seq"]:
         tokens = self.input_hook(tokens)
-        elevation = self.elevation_hook(self.elevation_calc(tokens))
+        left_parens = self.left_parens_hook(self.left_parens(tokens))
+        right_parens = self.right_parens_hook(self.right_parens(tokens))
+        elevation = self.elevation_hook(self.elevation_calc(left_parens, right_parens))
+        left_even = self.left_even_hook(self.even_checker(left_parens))
+        right_even = self.right_even_hook(self.even_checker(right_parens))
         ele_check = self.elevation_check_hook(self.elevation_checker(elevation))
         hor_check = self.horizon_check_hook(self.horizon_checker(elevation))
         hor_lookback = self.horizon_lookback_hook(self.horizon_lookback_head(hor_check))
-        balance = self.balance_check_hook(self.balance_check(hor_lookback, ele_check))
-        return balance.float().to(self.device)
+
+        task_id = self.task_hook(self.task_id(tokens))
+        output = self.output_check_hook(self.output_check(task_id, left_even, right_even, hor_lookback, ele_check))
+        
+        return output.float().to(self.device)
 
 def get_LL_parens_model_and_correspondence( n_ctx: int = 20  
 ) -> Tuple[HookedTransformer, Correspondence, list]:
@@ -118,8 +192,8 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
     """
     #Get HookedTransformer
     cfg = HookedTransformerConfig(
-        n_layers = 2,
-        d_model = 16,
+        n_layers = 3,
+        d_model = 32,
         n_ctx = n_ctx,
         d_head = 8,
         d_vocab = 4,
@@ -145,6 +219,14 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
         lns = {LLNode(name=k, index=idx, subspace=sp) for k, idx, sp in lks}
         corr_node_dict[hn] = lns
     corr_obj = Correspondence(corr_node_dict)
+
+    meaningful_ablations = [
+        'elevation_hook', #same as input_hook.
+        'elevation_check_hook',
+        'horizon_lookback_hook', #causally the same as horizon_check_hook
+        'balance_check_hook', #directly determines output....
+        
+    ]
 
     #Get unused nodes
     #TODO: We could further restrict computation subspaces, and this code doesn't allow for that.
@@ -172,59 +254,96 @@ def test_HL_parens_components():
         3. [BOS] ) ( ) ( ) ( ) ( ) (
         4. [BOS] ( ) ( ) ( ) ( ) ( )
     """
-    
+
     tokens = [
-        [3, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2],
-        [3, 0, 0, 0, 0, 0, 1, 1, 1, 2, 2],
-        [3, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
-        [3, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+        [3, 0, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2],
+        [3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 2],
+        [3, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+        [3, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+        [3, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1],
+        [3, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+        [3, 1, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2],
+        [3, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2],
+        [3, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2]
     ]
-    
+    true_lefts = [
+        [ 0,  0,  1,  1,  2,  2,  3,  3,  3,  3,  3,  3],
+        [ 0,  0,  1,  2,  3,  4,  5,  5,  5,  5,  5,  5],
+        [ 0,  0,  0,  1,  1,  2,  2,  3,  3,  4,  4,  5],
+        [ 0,  0,  1,  1,  2,  2,  3,  3,  4,  4,  5,  5],
+        [ 0,  0,  0,  0,  1,  1,  1,  2,  2,  2,  3,  3],
+        [ 0,  0,  1,  2,  2,  2,  2,  2,  2,  2,  2,  2],
+        [ 0,  0,  1,  1,  2,  2,  3,  3,  3,  3,  3,  3],
+        [ 0,  0,  1,  2,  3,  4,  4,  4,  4,  4,  4,  4],
+        [ 0,  0,  1,  2,  3,  4,  5,  5,  5,  5,  5,  5]
+    ]
+    true_rights = [
+        [ 0,  0,  0,  1,  1,  2,  2,  3,  3,  3,  3,  3],
+        [ 0,  0,  0,  0,  0,  0,  0,  1,  2,  3,  3,  3],
+        [ 0,  0,  1,  1,  2,  2,  3,  3,  4,  4,  5,  5],
+        [ 0,  0,  0,  1,  1,  2,  2,  3,  3,  4,  4,  5],
+        [ 0,  0,  1,  2,  2,  3,  4,  4,  5,  6,  6,  7],
+        [ 0,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8],
+        [ 0,  0,  0,  1,  1,  2,  2,  3,  3,  3,  3,  3],
+        [ 0,  0,  0,  0,  0,  0,  1,  2,  3,  4,  5,  5],
+        [ 0,  0,  0,  0,  0,  0,  0,  1,  2,  3,  4,  4]
+    ]
     true_elevations = [
-        [ 0,  1,  0,  1,  0,  1,  0,  0,  0,  0,  0],
-        [ 0,  1,  2,  3,  4,  5,  4,  3,  2,  2,  2],
-        [ 0, -1,  0, -1,  0, -1,  0, -1,  0, -1,  0],
-        [ 0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0]
+        [ 0,  0,  1,  0,  1,  0,  1,  0,  0,  0,  0,  0],
+        [ 0,  0,  1,  2,  3,  4,  5,  4,  3,  2,  2,  2],
+        [ 0,  0, -1,  0, -1,  0, -1,  0, -1,  0, -1,  0],
+        [ 0,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0],
+        [ 0,  0, -1, -2, -1, -2, -3, -2, -3, -4, -3, -4],
+        [ 0,  0,  1,  2,  1,  0, -1, -2, -3, -4, -5, -6],
+        [ 0,  0,  1,  0,  1,  0,  1,  0,  0,  0,  0,  0],
+        [ 0,  0,  1,  2,  3,  4,  3,  2,  1,  0, -1, -1],
+        [ 0,  0,  1,  2,  3,  4,  5,  4,  3,  2,  1,  1]
     ]
-    true_ele_check = [
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, False],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True]
-    ]
+    true_left_even = [ False, False, False, False, False, True, False, True, False ]
+    true_right_even = [ False, False, False, False, False, True, False, False, True ]
     true_hor_check = [
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True, False,  True, False,  True, False,  True, False,  True, False, True],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True]
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
+        [ True,  True, False,  True, False,  True, False,  True, False,  True, False, True],
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
+        [ True,  True, False, False, False, False, False, False, False, False, False, False],
+        [ True,  True,  True,  True,  True,  True, False, False, False, False, False, False],
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, False, False],
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True],
     ]
-    true_hor_lookback = [
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True],
-        [ True, False, False, False, False, False, False, False, False, False, False],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True]
-    ]
-    true_balance_check = [
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, False],
-        [ True, False, False, False, False, False, False, False, False, False, False],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True]
-    ]
+    true_ele_check =    [ True, False,  True, True, False, False, True, False, False ]
+    true_hor_lookback = [ True,  True, False, True, False, False, True, False,  True ]
+    true_task_id = [ 0, 0, 0, 0, 0, 1, 1, 1, 1]
+    true_output  = [ 1, 2, 3, 1, 0, 1, 0, 2, 3]
+
     tokens = t.Tensor(tokens).to(int)
+    true_lefts = t.Tensor(true_lefts).to(int)
+    true_rights = t.Tensor(true_rights).to(int)
     true_elevations = t.Tensor(true_elevations).to(int)
+    true_left_even = t.Tensor(true_left_even).to(bool)
+    true_right_even = t.Tensor(true_right_even).to(bool)
     true_ele_check = t.Tensor(true_ele_check).to(bool)
     true_hor_check = t.Tensor(true_hor_check).to(bool)
     true_hor_lookback = t.Tensor(true_hor_lookback).to(bool)
-    true_balance_check = t.Tensor(true_balance_check).to(bool)
+    true_task_id = t.Tensor(true_task_id).to(int)
+    true_output = t.Tensor(true_output).to(int)
+    
 
     balance_checker = HighLevelParensBalanceChecker()
-    balanced, cache = balance_checker.run_with_cache(tokens)
+    output, cache   = balance_checker.run_with_cache(tokens)
+    # print(cache['right_parens_hook'] - true_rights)
+    assert t.allclose(cache['left_parens_hook'], true_lefts)
+    assert t.allclose(cache['right_parens_hook'], true_rights)
     assert t.allclose(cache['elevation_hook'], true_elevations)
+    assert t.allclose(cache['left_even_hook'], true_left_even)
+    assert t.allclose(cache['right_even_hook'], true_right_even)
     assert t.allclose(cache['elevation_check_hook'], true_ele_check)
     assert t.allclose(cache['horizon_check_hook'], true_hor_check)
     assert t.allclose(cache['horizon_lookback_hook'], true_hor_lookback)
-    assert t.allclose(cache['balance_check_hook'], true_balance_check)
-    assert t.allclose(balanced, true_balance_check.float())
+    print(cache['task_hook'].dtype, true_task_id.dtype)
+    assert t.allclose(cache['task_hook'], true_task_id)
+    assert t.allclose(cache['output_check_hook'], true_output)
     print("All tests passed!")
 
 class ParensDatasetBase(ABC):
@@ -253,8 +372,7 @@ class ParensDatasetBase(ABC):
         self.dataset = Dataset.from_dict({
                 'tokens' : self.tokens,
                 'str_tokens' : self.str_tokens,
-                'labels': self.labels,
-                'markers' : self.markers
+                'labels': self.markers
             })
         
     def passes_balance(self,  sample):
@@ -269,8 +387,14 @@ class ParensDatasetBase(ABC):
         ele = np.cumsum(mod)
         return ele.min() >= 0
     
-    def passes_test(self, sample):
+    def passes_balance_test(self, sample):
         return self.passes_balance(sample)*self.passes_elevation(sample)
+
+    def left_even(self, sample):
+        return (sample == 0).sum().item() % 2 == 0
+        
+    def right_even(self, sample):
+        return (sample == 1).sum().item() % 2 == 0
 
     @abstractmethod
     def generate_tokens(self):
@@ -284,14 +408,16 @@ class ParensDatasetBase(ABC):
     def generate_labels(self):
         new_markers = np.zeros(self.tokens.shape[0], dtype=int)
         for i,sample in enumerate(self.tokens):
-            if self.passes_test(sample):
-                new_markers[i] = 1
-            elif (not self.passes_elevation(sample)) and self.passes_balance(sample):
-                new_markers[i] = 2
-            elif (not self.passes_balance(sample)) and self.passes_elevation(sample):
-                new_markers[i] = 3
-        self.labels = np.copy(new_markers)
-        self.labels[self.labels != 1] = 0
+            if sample[1] == 0:
+                sample = sample[2:]
+                if self.passes_balance_test(sample):
+                    new_markers[i] = 1
+                elif (not self.passes_balance(sample)) and self.passes_elevation(sample):
+                    new_markers[i] = 2
+                elif (not self.passes_elevation(sample)) and self.passes_balance(sample):
+                    new_markers[i] = 3
+            else:
+                raise NotImplementedError("Task 1+ logic not implemented for marking")
         self.markers = new_markers
 
     def get_dataset(self):
@@ -373,6 +499,99 @@ class BalancedParensDataset(ParensDatasetBase):
         fail_both = self._generate_absolute_failures(self.N_samples // 2, self.n_ctx - 2)
 
         dataset = t.cat([
+            balanced[:self.N_samples // 4],
+            fail_ele[:self.N_samples // 4],
+            fail_bal[:self.N_samples // 4],
+            fail_both[:self.N_samples // 4]
+        ], dim = 0)
+        dataset[dataset == 1]  = 0 #(
+        dataset[dataset == -1] = 1 #)
+        dataset = dataset[t.randperm(dataset.shape[0]),:] #shuffle the dataset.
+
+        #add BOS token to beginning and pad to end
+        self.tokens = np.concatenate([
+            3*np.ones((dataset.shape[0], 1)), #BOS
+            0*np.ones((dataset.shape[0], 1)), #task id
+            dataset, 
+            2*np.ones((dataset.shape[0], 1)) #pad
+        ], axis=1).astype(int)
+
+class BalancedEvenOddDataset(ParensDatasetBase):
+    def __init__(
+        self, 
+        N_samples: int, 
+        n_ctx: int = 40,
+        seed: int = 42
+    ):
+        np.random.seed(seed)
+        super().__init__(N_samples, n_ctx)
+
+    def _generate_token_subset(self, N_samples, n_ctx, passes_balance=True, passes_elevation=True):
+        """ Samples that fail both tests """
+    #     # assert n_ctx % 2 == 0, "n_ctx must be even."
+        
+    #     # generated_samples = min(N_samples, 1000)
+    #     # remaining_samples = N_samples
+    #     # good_samples = []
+    #     # while remaining_samples > 0:
+    #     #     if passes_balance:
+    #     #         pos_lengths = (n_ctx//2) * t.ones(generated_samples).to(int)
+    #     #         neg_lengths = pos_lengths
+    #     #     else:
+    #     #         # Generate +1 and -1 tensors so we ensure imbalance
+    #     #         # There's def a smarter way to do this with just generating the ones and then indexing.
+    #     #         coin_flip = t.randint(0, 2, (generated_samples,))
+    #     #         #Generate all from 0 - n_ctx//2 - 1
+    #     #         pos_lengths = t.randint(0, n_ctx//2, (generated_samples,))
+    #     #         #use coin flip to flip half to range n_ctx//2 + 1 -> n_ctx
+    #     #         pos_lengths[coin_flip == 0] = t.randint(n_ctx//2 + 1, n_ctx, ((coin_flip == 0).sum(),))
+    #     #         neg_lengths = n_ctx - pos_lengths
+    #     #     samples = [ t.cat((
+    #     #         t.ones((p.item())),
+    #     #         -t.ones((n.item()))
+    #     #     )) for p, n in zip(pos_lengths, neg_lengths)]
+    #     #     samples = t.stack(samples)
+            
+    #     #     # shuffle
+    #     #     indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
+    #     #     shuffled = t.gather(samples, 1, indices)
+
+    #     #     # create random elevations
+    #     #     elevation = t.cumsum(shuffled, dim=1)
+    #     #     min_values, _ = t.min(elevation, dim=1)
+            
+    #     #     # Step 6: Create appropriate mask for pass/fail on task
+    #     #     if passes_elevation:
+    #     #         mask = min_values >= 0
+    #     #     else:
+    #     #         mask = min_values < 0
+    #     #     masked_samples = shuffled[mask,:]
+    #     #     good_samples.append(masked_samples[:remaining_samples])
+    #     #     remaining_samples -= good_samples[-1].shape[0]
+            
+    #     return t.unique(t.cat(good_samples, dim=0), dim=0)
+        
+    # def _generate_balanced_tokens(self, N_samples, n_ctx):
+    #     return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_elevation=True)
+
+    # def _generate_elevation_failures(self, N_samples, n_ctx):
+    #     return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_elevation=False)
+        
+    # def _generate_balance_failures(self, N_samples, n_ctx):
+    #     return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_elevation=True)
+        
+    # def _generate_absolute_failures(self, N_samples, n_ctx):
+    #     return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_elevation=False)
+        
+    def generate_tokens(self):
+
+        #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
+        balanced = self._generate_balanced_tokens(self.N_samples, self.n_ctx - 2)
+        fail_ele = self._generate_elevation_failures(self.N_samples // 2, self.n_ctx - 2)
+        fail_bal = self._generate_balance_failures(self.N_samples // 2, self.n_ctx - 2)
+        fail_both = self._generate_absolute_failures(self.N_samples // 2, self.n_ctx - 2)
+
+        dataset = t.cat([
             balanced[:self.N_samples // 2],
             fail_ele[:self.N_samples // 6 + 1],
             fail_bal[:self.N_samples // 6 + 1],
@@ -384,9 +603,10 @@ class BalancedParensDataset(ParensDatasetBase):
 
         #add BOS token to beginning and pad to end
         self.tokens = np.concatenate([
-            3*np.ones((dataset.shape[0], 1)), 
+            3*np.ones((dataset.shape[0], 1)), #BOS
+            0*np.ones((dataset.shape[0], 1)), #task id
             dataset, 
-            2*np.ones((dataset.shape[0], 1))
+            2*np.ones((dataset.shape[0], 1)) #pad
         ], axis=1).astype(int)
 
 class SequentialParensDataset(ParensDatasetBase):
