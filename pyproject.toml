@@ -27,5 +27,6 @@ dependencies = [
     "pyright",
     "pytest",
     "numpy<2.0.0",  # 2.0 Unsupported by datasets
+    "huggingface-hub==0.24.0", # per https://github.com/run-llama/llama_index/discussions/14605
 ]
 version = "0.1.0"
