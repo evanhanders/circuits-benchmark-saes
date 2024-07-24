@@ -120,14 +120,15 @@ class OutputChecks(t.nn.Module):
         #Calculate parens balance output
         bal_output = t.zeros_like(task_id)
         bal_output[ele_check*bal_check] = 1
-        bal_output[ele_check*(~bal_check)] = 2
-        bal_output[(~ele_check)*bal_check] = 3
+        # bal_output[ele_check*(~bal_check)] = 2
+        # bal_output[(~ele_check)*bal_check] = 3
 
         #Calculate left / right odd-even output
         even_output = t.zeros_like(task_id)
-        even_output[left_even*right_even] = 1
-        even_output[left_even*(~right_even)] = 2
-        even_output[(~left_even)*right_even] = 3
+        even_output[left_even] = 1
+        # even_output[left_even*right_even] = 1
+        # even_output[left_even*(~right_even)] = 2
+        # even_output[(~left_even)*right_even] = 3
 
         return t.where(task_id == 0, bal_output, even_output)       
         
@@ -207,11 +208,15 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
     hor_neurons = t.arange(cfg.d_model*2, cfg.d_model*4).int()
     corr = {
         'input_hook' :           [('blocks.0.hook_resid_pre', Ix[[None]],                None)],
-        'elevation_hook' :       [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
-        'elevation_check_hook' : [('blocks.0.mlp.hook_post',  Ix[[None]],                ele_neurons)],
-        'horizon_check_hook' :   [('blocks.0.mlp.hook_post',  Ix[[None]],                hor_neurons)], 
-        'horizon_lookback_hook': [('blocks.1.attn.hook_z',    Ix[[None, None, 1, None]], None)],
-        'balance_check_hook' :   [('blocks.1.mlp.hook_post',    Ix[[None]],                None)]
+        'left_parens_hook' :     [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
+        'right_parens_hook' :    [('blocks.0.attn.hook_z',    Ix[[None, None, 1, None]], None)],
+        'elevation_hook' :       [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
+        'left_even_hook' :       [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
+        'task_hook':             [('blocks.1.attn.hook_z',   Ix[[None, None, 2, None]], None)],
+        'elevation_check_hook' : [('blocks.1.mlp.hook_post',  Ix[[None]], ele_neurons)],
+        'horizon_check_hook' :   [('blocks.1.mlp.hook_post',  Ix[[None]], hor_neurons)], 
+        'horizon_lookback_hook': [('blocks.2.attn.hook_z',    Ix[[None, None, 3, None]], None)],
+        'output_check_hook' :    [('blocks.2.mlp.hook_post',  Ix[[None]], None)]
     }
     corr_node_dict = {}
     for hk, lks in corr.items():
@@ -220,19 +225,21 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
         corr_node_dict[hn] = lns
     corr_obj = Correspondence(corr_node_dict)
 
-    meaningful_ablations = [
-        'elevation_hook', #same as input_hook.
-        'elevation_check_hook',
-        'horizon_lookback_hook', #causally the same as horizon_check_hook
-        'balance_check_hook', #directly determines output....
+    #todo: think about what meaningful ablations actually exist...
+    # meaningful_ablations = [
+    #     'elevation_hook', #same as input_hook.
+    #     'elevation_check_hook',
+    #     'horizon_lookback_hook', #causally the same as horizon_check_hook
+    #     'balance_check_hook', #directly determines output....
         
-    ]
+    # ]
 
     #Get unused nodes
     #TODO: We could further restrict computation subspaces, and this code doesn't allow for that.
     unused_model_labels = [
-        ('blocks.0.attn.hook_z', [1]),
-        ('blocks.1.attn.hook_z', [0]), 
+        ('blocks.0.attn.hook_z', [2, 3]),
+        ('blocks.1.attn.hook_z', [0, 1, 3]), 
+        ('blocks.2.attn.hook_z', [0, 1, 2])
     ]
     unused_hook_nodes = []
     for label in unused_model_labels:
@@ -315,7 +322,8 @@ def test_HL_parens_components():
     true_ele_check =    [ True, False,  True, True, False, False, True, False, False ]
     true_hor_lookback = [ True,  True, False, True, False, False, True, False,  True ]
     true_task_id = [ 0, 0, 0, 0, 0, 1, 1, 1, 1]
-    true_output  = [ 1, 2, 3, 1, 0, 1, 0, 2, 3]
+    # true_output  = [ 1, 2, 3, 1, 0, 1, 0, 2, 3] #accounts for different types of tasks
+    true_output  = [ 1, 0, 0, 1, 0, 1, 0, 1, 0]
 
     tokens = t.Tensor(tokens).to(int)
     true_lefts = t.Tensor(true_lefts).to(int)
@@ -372,7 +380,8 @@ class ParensDatasetBase(ABC):
         self.dataset = Dataset.from_dict({
                 'tokens' : self.tokens,
                 'str_tokens' : self.str_tokens,
-                'labels': self.markers
+                'labels': self.labels,
+                'markers' : self.markers
             })
         
     def passes_balance(self,  sample):
@@ -390,10 +399,10 @@ class ParensDatasetBase(ABC):
     def passes_balance_test(self, sample):
         return self.passes_balance(sample)*self.passes_elevation(sample)
 
-    def left_even(self, sample):
+    def passes_left_even(self, sample):
         return (sample == 0).sum().item() % 2 == 0
         
-    def right_even(self, sample):
+    def passes_right_even(self, sample):
         return (sample == 1).sum().item() % 2 == 0
 
     @abstractmethod
@@ -416,9 +425,15 @@ class ParensDatasetBase(ABC):
                     new_markers[i] = 2
                 elif (not self.passes_elevation(sample)) and self.passes_balance(sample):
                     new_markers[i] = 3
+            elif sample[1] == 1:
+                sample = sample[2:]
+                if self.passes_left_even(sample):
+                    new_markers[i] = 1
             else:
                 raise NotImplementedError("Task 1+ logic not implemented for marking")
         self.markers = new_markers
+        self.labels = np.copy(self.markers)
+        self.labels[self.labels != 1] = 0
 
     def get_dataset(self):
         return self.dataset
@@ -493,10 +508,10 @@ class BalancedParensDataset(ParensDatasetBase):
     def generate_tokens(self):
 
         #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
-        balanced = self._generate_balanced_tokens(self.N_samples, self.n_ctx - 2)
-        fail_ele = self._generate_elevation_failures(self.N_samples // 2, self.n_ctx - 2)
-        fail_bal = self._generate_balance_failures(self.N_samples // 2, self.n_ctx - 2)
-        fail_both = self._generate_absolute_failures(self.N_samples // 2, self.n_ctx - 2)
+        balanced = self._generate_balanced_tokens(self.N_samples, self.n_ctx - 3)
+        fail_ele = self._generate_elevation_failures(self.N_samples // 2, self.n_ctx - 3)
+        fail_bal = self._generate_balance_failures(self.N_samples // 2, self.n_ctx - 3)
+        fail_both = self._generate_absolute_failures(self.N_samples // 2, self.n_ctx - 3)
 
         dataset = t.cat([
             balanced[:self.N_samples // 4],
@@ -516,7 +531,7 @@ class BalancedParensDataset(ParensDatasetBase):
             2*np.ones((dataset.shape[0], 1)) #pad
         ], axis=1).astype(int)
 
-class BalancedEvenOddDataset(ParensDatasetBase):
+class EvenLeftParensDataset(ParensDatasetBase):
     def __init__(
         self, 
         N_samples: int, 
@@ -526,76 +541,43 @@ class BalancedEvenOddDataset(ParensDatasetBase):
         np.random.seed(seed)
         super().__init__(N_samples, n_ctx)
 
-    def _generate_token_subset(self, N_samples, n_ctx, passes_balance=True, passes_elevation=True):
+    def _generate_even_or_odd(self, N_samples, n_ctx, is_even=True):
         """ Samples that fail both tests """
-    #     # assert n_ctx % 2 == 0, "n_ctx must be even."
+        assert n_ctx % 2 == 0, "n_ctx must be even."
         
-    #     # generated_samples = min(N_samples, 1000)
-    #     # remaining_samples = N_samples
-    #     # good_samples = []
-    #     # while remaining_samples > 0:
-    #     #     if passes_balance:
-    #     #         pos_lengths = (n_ctx//2) * t.ones(generated_samples).to(int)
-    #     #         neg_lengths = pos_lengths
-    #     #     else:
-    #     #         # Generate +1 and -1 tensors so we ensure imbalance
-    #     #         # There's def a smarter way to do this with just generating the ones and then indexing.
-    #     #         coin_flip = t.randint(0, 2, (generated_samples,))
-    #     #         #Generate all from 0 - n_ctx//2 - 1
-    #     #         pos_lengths = t.randint(0, n_ctx//2, (generated_samples,))
-    #     #         #use coin flip to flip half to range n_ctx//2 + 1 -> n_ctx
-    #     #         pos_lengths[coin_flip == 0] = t.randint(n_ctx//2 + 1, n_ctx, ((coin_flip == 0).sum(),))
-    #     #         neg_lengths = n_ctx - pos_lengths
-    #     #     samples = [ t.cat((
-    #     #         t.ones((p.item())),
-    #     #         -t.ones((n.item()))
-    #     #     )) for p, n in zip(pos_lengths, neg_lengths)]
-    #     #     samples = t.stack(samples)
+        generated_samples = min(N_samples, 1000)
+        remaining_samples = N_samples
+        good_samples = []
+        while remaining_samples > 0:
+            if is_even:
+                pos_lengths = 2*t.randint(0, n_ctx//2, (generated_samples,))
+            else:
+                pos_lengths = 2*t.randint(0, n_ctx//2 - 1, (generated_samples,)) + 1
+            neg_lengths = n_ctx - pos_lengths
             
-    #     #     # shuffle
-    #     #     indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
-    #     #     shuffled = t.gather(samples, 1, indices)
+            samples = [ t.cat((
+                t.ones((p.item())),
+                -t.ones((n.item()))
+            )) for p, n in zip(pos_lengths, neg_lengths)]
+            samples = t.stack(samples)
+            
+            # shuffle
+            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
+            shuffled = t.gather(samples, 1, indices)
 
-    #     #     # create random elevations
-    #     #     elevation = t.cumsum(shuffled, dim=1)
-    #     #     min_values, _ = t.min(elevation, dim=1)
+            good_samples.append(shuffled)
+            remaining_samples -= good_samples[-1].shape[0]
             
-    #     #     # Step 6: Create appropriate mask for pass/fail on task
-    #     #     if passes_elevation:
-    #     #         mask = min_values >= 0
-    #     #     else:
-    #     #         mask = min_values < 0
-    #     #     masked_samples = shuffled[mask,:]
-    #     #     good_samples.append(masked_samples[:remaining_samples])
-    #     #     remaining_samples -= good_samples[-1].shape[0]
-            
-    #     return t.unique(t.cat(good_samples, dim=0), dim=0)
-        
-    # def _generate_balanced_tokens(self, N_samples, n_ctx):
-    #     return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_elevation=True)
-
-    # def _generate_elevation_failures(self, N_samples, n_ctx):
-    #     return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_elevation=False)
-        
-    # def _generate_balance_failures(self, N_samples, n_ctx):
-    #     return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_elevation=True)
-        
-    # def _generate_absolute_failures(self, N_samples, n_ctx):
-    #     return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_elevation=False)
+        return t.unique(t.cat(good_samples, dim=0), dim=0)
         
     def generate_tokens(self):
-
-        #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
-        balanced = self._generate_balanced_tokens(self.N_samples, self.n_ctx - 2)
-        fail_ele = self._generate_elevation_failures(self.N_samples // 2, self.n_ctx - 2)
-        fail_bal = self._generate_balance_failures(self.N_samples // 2, self.n_ctx - 2)
-        fail_both = self._generate_absolute_failures(self.N_samples // 2, self.n_ctx - 2)
+        #make another half of the dataset that is a 50/50 mix of even / odd generation. 
+        even_tokens = self._generate_even_or_odd(self.N_samples, self.n_ctx - 3, is_even=True)
+        odd_tokens = self._generate_even_or_odd(self.N_samples, self.n_ctx - 3, is_even=False)
 
         dataset = t.cat([
-            balanced[:self.N_samples // 2],
-            fail_ele[:self.N_samples // 6 + 1],
-            fail_bal[:self.N_samples // 6 + 1],
-            fail_both[:self.N_samples // 6]
+            even_tokens[:self.N_samples // 2],
+            odd_tokens[:self.N_samples // 2],
         ], dim = 0)
         dataset[dataset == 1]  = 0 #(
         dataset[dataset == -1] = 1 #)
@@ -604,10 +586,26 @@ class BalancedEvenOddDataset(ParensDatasetBase):
         #add BOS token to beginning and pad to end
         self.tokens = np.concatenate([
             3*np.ones((dataset.shape[0], 1)), #BOS
-            0*np.ones((dataset.shape[0], 1)), #task id
+            1*np.ones((dataset.shape[0], 1)), #task id
             dataset, 
             2*np.ones((dataset.shape[0], 1)) #pad
         ], axis=1).astype(int)
+
+class TwoTaskParensDataset(BalancedParensDataset, EvenLeftParensDataset):
+        
+    def generate_tokens(self):
+        N_samples_full = self.N_samples
+        self.N_samples = self.N_samples // 2
+
+        BalancedParensDataset.generate_tokens(self)
+        these_tokens = np.copy(self.tokens)
+        EvenLeftParensDataset.generate_tokens(self)
+
+        self.tokens = np.concatenate((self.tokens, these_tokens), axis=0).astype(int)
+        #reshuffle
+        np.random.shuffle(self.tokens)
+        self.N_samples = N_samples_full
+
 
 class SequentialParensDataset(ParensDatasetBase):
     def __init__(

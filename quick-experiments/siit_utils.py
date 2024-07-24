@@ -171,7 +171,7 @@ class ModelTrainerSIIT:
         hl_output = self.hl_model.run_with_hooks(b_input, fwd_hooks=[
             (hl_node.name, hl_hook_fn)
         ])
-        hl_label = hl_output[:,-1].to(self.device)
+        hl_label = hl_output.to(self.device)
         
         hooks = []
         for node in ll_nodes:
