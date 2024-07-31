@@ -31,8 +31,8 @@ def build_traintest_dataloaders(
     #we need two dataloaders for both train and test to do interchange interventions.
     train_dataloader  = DataLoader(train_t_dataset, batch_size=batch_size, shuffle = True)
     train_dataloader2 = DataLoader(train_t_dataset, batch_size=batch_size, shuffle = True)
-    test_dataloader   = DataLoader(test_t_dataset, batch_size=batch_size)
-    test_dataloader2  = DataLoader(test_t_dataset, batch_size=batch_size)
+    test_dataloader   = DataLoader(test_t_dataset, batch_size=batch_size, shuffle = True)
+    test_dataloader2  = DataLoader(test_t_dataset, batch_size=batch_size, shuffle = True)
     return (train_dataloader, train_dataloader2), (test_dataloader, test_dataloader2)
 
 def HL_interchange_intervention(
@@ -123,6 +123,17 @@ class ModelTrainerSIIT:
         self.iit_weight = iit_weight
         self.siit_weight = siit_weight
 
+        # find "tied" HL nodes that map to the same LL circuit parts as one another.
+        self.tied_nodes: dict[HLNode, Set[HLNode]] = {}
+        for hl_node in self.corr_keys:
+            tied_nodes = set()
+            for hl_node2 in self.corr_keys:
+                if hl_node == hl_node2:
+                    continue
+                if self.corr[hl_node] == self.corr[hl_node2]:
+                    tied_nodes.add(hl_node2)
+            self.tied_nodes[hl_node] = tied_nodes
+
     def get_iit_loss(
         self, 
         b_input : Int[t.Tensor, "batch n_ctx"], 
@@ -133,9 +144,13 @@ class ModelTrainerSIIT:
         if not testing:
             # sample one of the operations to do the intervention on:
             hl_node = self.corr_keys[t.randint(0, len(self.corr_keys), (1,)).item()]
+            if len(self.tied_nodes[hl_node]) > 0:
+                nodes = set([hl_node,]) | self.tied_nodes[hl_node]
+            else:
+                nodes = set([hl_node,])
             ll_nodes = self.corr[hl_node]
             return self._calculate_single_iit_loss(
-                hl_node,
+                nodes,
                 ll_nodes,
                 b_input,
                 hl_cache,
@@ -146,7 +161,7 @@ class ModelTrainerSIIT:
             for hl_node in list(self.corr_keys):
                 ll_nodes = self.corr[hl_node]
                 loss, iia = self._calculate_single_iit_loss(
-                    hl_node,
+                    set((hl_node,)),
                     ll_nodes,
                     b_input,
                     hl_cache,
@@ -159,7 +174,7 @@ class ModelTrainerSIIT:
 
     def _calculate_single_iit_loss(
         self,
-        hl_node : HLNode,
+        hl_nodes : Set[HLNode],
         ll_nodes : Set[LLNode],
         b_input : Int[t.Tensor, "batch n_ctx"], 
         hl_cache : ActivationCache, 
@@ -169,7 +184,7 @@ class ModelTrainerSIIT:
         #run the intervention on the Hl model doing a forward pass with b
         hl_hook_fn = partial(HL_interchange_intervention, cache=hl_cache)
         hl_output = self.hl_model.run_with_hooks(b_input, fwd_hooks=[
-            (hl_node.name, hl_hook_fn)
+            (hl_node.name, hl_hook_fn) for hl_node in hl_nodes
         ])
         hl_label = hl_output.to(self.device)
         
@@ -187,6 +202,9 @@ class ModelTrainerSIIT:
         ll_prob = t.sigmoid(ll_output)[:,-1,-1]
         similarity = t.abs(hl_label - (ll_prob > 0.5).float()) < tol
         iia = t.sum(similarity) / similarity.shape[0]
+
+
+        # print(f'iit on {hl_nodes} and {ll_nodes}; iia: {iia.item()}')
         
         return iit_loss, iia
 

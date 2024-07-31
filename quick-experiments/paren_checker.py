@@ -119,7 +119,7 @@ class OutputChecks(t.nn.Module):
         if task_id[-1] == 0:
             return (ele_check*bal_check).to(int)
         elif task_id[-1] == 1:
-            return left_greater[:,-1]
+            return (left_greater[:,-1] == 1).to(int)
         else:
             raise NotImplementedError("Task 2+ logic not implemented") 
 
@@ -144,6 +144,8 @@ class HighLevelParensBalanceChecker(HookedRootModule):
 
         self.greater_than = GreaterThan()
         self.elevation_calc = ElevationCalculator()
+        self.greater_hook = HookPoint()
+        self.elevation_hook = HookPoint()
         self.mlp0_hook = HookPoint()
 
         self.elevation_checker = CheckElevation()
@@ -164,26 +166,23 @@ class HighLevelParensBalanceChecker(HookedRootModule):
         task_id = self.task_hook(self.task_id(tokens))
 
         # parens checker circuit
-        elevation = self.elevation_calc(left_parens, right_parens)
-        left_greater = self.greater_than(left_parens, right_parens)
+        elevation = self.elevation_hook(self.elevation_calc(left_parens, right_parens))
+        left_greater = self.greater_hook(self.greater_than(left_parens, right_parens))
 
         mlp0_data = t.zeros_like(elevation)
         mlp0_data[task_id == 0] = elevation[task_id == 0]
         mlp0_data[task_id == 1] = left_greater[task_id == 1]
         mlp0_data = self.mlp0_hook(mlp0_data)
-
-        elevation[task_id == 0] = mlp0_data[task_id == 0]
-        left_greater[task_id == 1] = mlp0_data[task_id == 1]
         
-        ele_check = self.elevation_checker(elevation)
-        hor_check = self.horizon_checker(elevation)
+        ele_check = self.elevation_checker(mlp0_data)
+        hor_check = self.horizon_checker(mlp0_data)
         hook_mlp1 = self.mlp1_hook(t.cat((ele_check.unsqueeze(1), hor_check), dim=1))
         ele_check = hook_mlp1[:,0]
         hor_check = hook_mlp1[:,1:]
         hor_lookback = self.horizon_lookback_hook(self.horizon_lookback_head(hor_check))
 
 
-        output = self.output_check_hook(self.output_check(task_id, left_greater, hor_lookback, ele_check))
+        output = self.output_check_hook(self.output_check(task_id, mlp0_data, hor_lookback, ele_check))
         
         return output.float().to(self.device)
 
@@ -212,7 +211,9 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
         'left_parens_hook' :     [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
         'right_parens_hook' :    [('blocks.0.attn.hook_z',    Ix[[None, None, 1, None]], None)],
         'task_hook':             [('blocks.0.attn.hook_z',    Ix[[None, None, 2, None]], None)],
-        'mlp0_hook' :            [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
+        'mlp0_hook':             [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
+        # 'greater_hook' :         [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
+        # 'elevation_hook' :       [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
         'mlp1_hook' :            [('blocks.1.mlp.hook_post',  Ix[[None]], None)],
         'horizon_lookback_hook': [('blocks.2.attn.hook_z',    Ix[[None, None, 3, None]], None)],
         'output_check_hook' :    [('blocks.2.mlp.hook_post',  Ix[[None]], None)]
@@ -300,7 +301,7 @@ def test_HL_parens_balancer_components():
     assert t.allclose(cache['left_parens_hook'], true_lefts)
     assert t.allclose(cache['right_parens_hook'], true_rights)
     assert t.allclose(cache['task_hook'], true_task_id)
-    assert t.allclose(cache['mlp0_hook'], true_mlp0_check)
+    assert t.allclose(cache['elevation_hook'], true_mlp0_check)
     assert t.allclose(cache['mlp1_hook'], true_mlp1_check)
     assert t.allclose(cache['horizon_lookback_hook'], true_hor_lookback)
     assert t.allclose(cache['output_check_hook'], true_output)
@@ -354,7 +355,7 @@ def test_HL_parens_gtr_components():
     assert t.allclose(cache['left_parens_hook'], true_lefts)
     assert t.allclose(cache['right_parens_hook'], true_rights)
     assert t.allclose(cache['task_hook'], true_task_id)
-    assert t.allclose(cache['mlp0_hook'], true_mlp0_check)
+    assert t.allclose(cache['greater_hook'], true_mlp0_check)
     assert t.allclose(cache['output_check_hook'], true_output)
     print("All tests passed!")
     return True
@@ -404,12 +405,9 @@ class ParensDatasetBase(ABC):
     def passes_balance_test(self, sample):
         return self.passes_balance(sample)*self.passes_elevation(sample)
 
-    def passes_left_even(self, sample):
-        return (sample == 0).sum().item() % 2 == 0
-        
-    def passes_right_even(self, sample):
-        return (sample == 1).sum().item() % 2 == 0
-
+    def passes_left_gtr_right(self, sample):
+        return (sample == 0).sum() > (sample == 1).sum()
+    
     @abstractmethod
     def generate_tokens(self):
         pass
@@ -432,7 +430,7 @@ class ParensDatasetBase(ABC):
                     new_markers[i] = 3
             elif sample[1] == 1:
                 sample = sample[2:]
-                if self.passes_left_even(sample):
+                if self.passes_left_gtr_right(sample):
                     new_markers[i] = 1
             else:
                 raise NotImplementedError("Task 1+ logic not implemented for marking")
