@@ -70,7 +70,7 @@ class GreaterThan(t.nn.Module):
     """ Calculates if a number is even or not  """
 
     def forward(self, left: Int[t.Tensor, "batch seq"], right: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch seq"]:
-        return (left > right).to(int)
+        return (left > right)
 
 class TaskIdentifier(t.nn.Module):
 
@@ -116,12 +116,12 @@ class OutputChecks(t.nn.Module):
         ele_check : Bool[t.Tensor, "batch"],
         bal_check : Bool[t.Tensor, "batch"]
     ) -> Int[t.Tensor, "batch"]:
-        if task_id[-1] == 0:
-            return (ele_check*bal_check).to(int)
-        elif task_id[-1] == 1:
-            return (left_greater[:,-1] == 1).to(int)
-        else:
-            raise NotImplementedError("Task 2+ logic not implemented") 
+        if task_id.min() < 0 or task_id.max() > 1:
+            raise ValueError("Task ID must be 0 or 1")
+        result = t.zeros(task_id.shape[0]).to(int)
+        result[task_id == 0] = (ele_check*bal_check).to(int)[task_id == 0]
+        result[task_id == 1] = (left_greater[:,-1] == 1).to(int)[task_id == 1]
+        return result
 
 class HighLevelParensBalanceChecker(HookedRootModule):
     """
@@ -165,24 +165,21 @@ class HighLevelParensBalanceChecker(HookedRootModule):
         right_parens = self.right_parens_hook(self.right_parens(tokens))
         task_id = self.task_hook(self.task_id(tokens))
 
-        # parens checker circuit
         elevation = self.elevation_hook(self.elevation_calc(left_parens, right_parens))
         left_greater = self.greater_hook(self.greater_than(left_parens, right_parens))
-
-        mlp0_data = t.zeros_like(elevation)
-        mlp0_data[task_id == 0] = elevation[task_id == 0]
-        mlp0_data[task_id == 1] = left_greater[task_id == 1]
-        mlp0_data = self.mlp0_hook(mlp0_data)
+        mlp0 = self.mlp0_hook(t.stack((elevation, left_greater)))
+        elevation = mlp0[0]
+        left_greater = mlp0[1]
         
-        ele_check = self.elevation_checker(mlp0_data)
-        hor_check = self.horizon_checker(mlp0_data)
+        ele_check = self.elevation_checker(elevation)
+        hor_check = self.horizon_checker(elevation)
         hook_mlp1 = self.mlp1_hook(t.cat((ele_check.unsqueeze(1), hor_check), dim=1))
         ele_check = hook_mlp1[:,0]
-        hor_check = hook_mlp1[:,1:]
+        hor_check = hook_mlp1[:,1:hor_check.shape[1]+1]
         hor_lookback = self.horizon_lookback_hook(self.horizon_lookback_head(hor_check))
 
 
-        output = self.output_check_hook(self.output_check(task_id, mlp0_data, hor_lookback, ele_check))
+        output = self.output_check_hook(self.output_check(task_id, left_greater, hor_lookback, ele_check))
         
         return output.float().to(self.device)
 
@@ -207,13 +204,11 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
 
     #Get Correspondence
     corr = {
-        'input_hook' :           [('blocks.0.hook_resid_pre', Ix[[None]],                None)],
+        'input_hook' :           [('hook_embed', Ix[[None]],                None)],
         'left_parens_hook' :     [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
         'right_parens_hook' :    [('blocks.0.attn.hook_z',    Ix[[None, None, 1, None]], None)],
         'task_hook':             [('blocks.0.attn.hook_z',    Ix[[None, None, 2, None]], None)],
         'mlp0_hook':             [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
-        # 'greater_hook' :         [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
-        # 'elevation_hook' :       [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
         'mlp1_hook' :            [('blocks.1.mlp.hook_post',  Ix[[None]], None)],
         'horizon_lookback_hook': [('blocks.2.attn.hook_z',    Ix[[None, None, 3, None]], None)],
         'output_check_hook' :    [('blocks.2.mlp.hook_post',  Ix[[None]], None)]
@@ -290,6 +285,7 @@ def test_HL_parens_balancer_components():
     true_rights = t.Tensor(true_rights).to(int)
     true_mlp0_check = t.Tensor(true_mlp0_check).to(int)
     true_mlp1_check = t.Tensor(true_mlp1_check).to(bool)
+    true_mlp1_check = t.cat([true_mlp1_check, true_lefts > true_rights], dim=1)
     true_hor_lookback = t.Tensor(true_hor_lookback).to(bool)
     true_task_id = t.Tensor(true_task_id).to(int)
     true_output = t.Tensor(true_output).to(int)
@@ -331,20 +327,17 @@ def test_HL_parens_gtr_components():
         [ 0,  0,  0,  1,  1,  2,  2,  3,  3,  4,  4,  5],
         [ 0,  0,  1,  2,  2,  3,  4,  4,  5,  6,  6,  7],
     ]
-    true_mlp0_check = [ # left > right
-        [ 0,  0,  1,  0,  1,  0,  1,  0,  0,  0,  0,  0],
-        [ 0,  0,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1],
-        [ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
-        [ 0,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0],
-        [ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
-    ]
     true_task_id = [ 1, 1, 1, 1, 1,]
     true_output  = [ 0, 1, 0, 0, 0, ]
 
     tokens = t.Tensor(tokens).to(int)
     true_lefts = t.Tensor(true_lefts).to(int)
     true_rights = t.Tensor(true_rights).to(int)
-    true_mlp0_check = t.Tensor(true_mlp0_check).to(int)
+    elevation = true_lefts - true_rights
+    true_mlp0_check = elevation
+    ele_check = elevation[:,-1] == 0
+    hor_check = elevation >= 0
+    true_mlp1_check = t.cat([ele_check[:,None], hor_check, true_lefts > true_rights], dim=1)
     true_task_id = t.Tensor(true_task_id).to(int)
     true_output = t.Tensor(true_output).to(int)
     
@@ -355,7 +348,8 @@ def test_HL_parens_gtr_components():
     assert t.allclose(cache['left_parens_hook'], true_lefts)
     assert t.allclose(cache['right_parens_hook'], true_rights)
     assert t.allclose(cache['task_hook'], true_task_id)
-    assert t.allclose(cache['greater_hook'], true_mlp0_check)
+    assert t.allclose(cache['mlp0_hook'], true_mlp0_check)
+    assert t.allclose(cache['mlp1_hook'], true_mlp1_check)
     assert t.allclose(cache['output_check_hook'], true_output)
     print("All tests passed!")
     return True

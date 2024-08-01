@@ -165,7 +165,8 @@ class ModelTrainerSIIT:
                     ll_nodes,
                     b_input,
                     hl_cache,
-                    ll_cache
+                    ll_cache,
+                    verbose = False
                 )
                 running_loss += loss
                 running_iia += iia
@@ -178,7 +179,8 @@ class ModelTrainerSIIT:
         ll_nodes : Set[LLNode],
         b_input : Int[t.Tensor, "batch n_ctx"], 
         hl_cache : ActivationCache, 
-        ll_cache : ActivationCache
+        ll_cache : ActivationCache,
+        verbose: bool = False
     ) -> Tuple[Float[t.Tensor, ''], Float[t.Tensor, '']]:
         
         #run the intervention on the Hl model doing a forward pass with b
@@ -203,8 +205,11 @@ class ModelTrainerSIIT:
         similarity = t.abs(hl_label - (ll_prob > 0.5).float()) < tol
         iia = t.sum(similarity) / similarity.shape[0]
 
-
-        # print(f'iit on {hl_nodes} and {ll_nodes}; iia: {iia.item()}')
+        if verbose:
+            print(f'iit on {hl_nodes} and {ll_nodes}; iia: {iia.item()}')
+            if list(hl_nodes)[0].name == 'input_hook':
+                print(b_input[:, 1] - hl_cache['input_hook'][:,1])
+                print(hl_label - ll_prob)
         
         return iit_loss, iia
 
