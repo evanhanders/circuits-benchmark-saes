@@ -158,8 +158,12 @@ class HighLevelParensBalanceChecker(HookedRootModule):
         self.output_check_hook = HookPoint()
         self.device = device
         self.setup()
+    
+    def is_categorical(self) -> bool:
+        return True
 
-    def forward(self, tokens: Int[t.Tensor, "batch seq"]) -> Float[t.Tensor, "batch seq"]:
+    def forward(self, inputs: tuple[Int[t.Tensor, "batch seq"], t.Tensor, t.Tensor]) -> Float[t.Tensor, "batch seq logits"]:
+        tokens, _, _ = inputs
         tokens = self.input_hook(tokens)
         left_parens = self.left_parens_hook(self.left_parens(tokens))
         right_parens = self.right_parens_hook(self.right_parens(tokens))
@@ -179,9 +183,13 @@ class HighLevelParensBalanceChecker(HookedRootModule):
         hor_lookback = self.horizon_lookback_hook(self.horizon_lookback_head(hor_check))
 
 
+    
         output = self.output_check_hook(self.output_check(task_id, left_greater, hor_lookback, ele_check))
+        true_output = t.zeros((output.shape[0], 1, 2)).to(self.device)
+        true_output[output == 0, :, 0] = 1
+        true_output[output == 1, :, 1] = 1
         
-        return output.float().to(self.device)
+        return true_output.float().to(self.device)
 
 def get_LL_parens_model_and_correspondence( n_ctx: int = 20  
 ) -> Tuple[HookedTransformer, Correspondence, list]:
