@@ -284,8 +284,8 @@ def test_HL_parens_balancer_components():
     true_lefts = t.Tensor(true_lefts).to(int)
     true_rights = t.Tensor(true_rights).to(int)
     true_mlp0_check = t.Tensor(true_mlp0_check).to(int)
+    true_mlp0_check = t.stack((true_mlp0_check, (true_lefts > true_rights).to(int)))
     true_mlp1_check = t.Tensor(true_mlp1_check).to(bool)
-    true_mlp1_check = t.cat([true_mlp1_check, true_lefts > true_rights], dim=1)
     true_hor_lookback = t.Tensor(true_hor_lookback).to(bool)
     true_task_id = t.Tensor(true_task_id).to(int)
     true_output = t.Tensor(true_output).to(int)
@@ -297,7 +297,7 @@ def test_HL_parens_balancer_components():
     assert t.allclose(cache['left_parens_hook'], true_lefts)
     assert t.allclose(cache['right_parens_hook'], true_rights)
     assert t.allclose(cache['task_hook'], true_task_id)
-    assert t.allclose(cache['elevation_hook'], true_mlp0_check)
+    assert t.allclose(cache['mlp0_hook'], true_mlp0_check)
     assert t.allclose(cache['mlp1_hook'], true_mlp1_check)
     assert t.allclose(cache['horizon_lookback_hook'], true_hor_lookback)
     assert t.allclose(cache['output_check_hook'], true_output)
@@ -334,10 +334,10 @@ def test_HL_parens_gtr_components():
     true_lefts = t.Tensor(true_lefts).to(int)
     true_rights = t.Tensor(true_rights).to(int)
     elevation = true_lefts - true_rights
-    true_mlp0_check = elevation
+    true_mlp0_check = t.stack((elevation, true_lefts > true_rights)).to(int)
     ele_check = elevation[:,-1] == 0
     hor_check = elevation >= 0
-    true_mlp1_check = t.cat([ele_check[:,None], hor_check, true_lefts > true_rights], dim=1)
+    true_mlp1_check = t.cat([ele_check[:,None], hor_check], dim=1)
     true_task_id = t.Tensor(true_task_id).to(int)
     true_output = t.Tensor(true_output).to(int)
     
