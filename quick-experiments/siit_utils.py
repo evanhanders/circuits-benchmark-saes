@@ -185,9 +185,10 @@ class ModelTrainerSIIT:
         
         #run the intervention on the Hl model doing a forward pass with b
         hl_hook_fn = partial(HL_interchange_intervention, cache=hl_cache)
-        hl_output = self.hl_model.run_with_hooks(b_input, fwd_hooks=[
+        hl_output = self.hl_model.run_with_hooks((b_input, None, None), fwd_hooks=[
             (hl_node.name, hl_hook_fn) for hl_node in hl_nodes
         ])
+        hl_output = hl_output[:,-1,:].argmax(dim=-1)
         hl_label = hl_output.to(self.device)
         
         hooks = []
@@ -196,7 +197,7 @@ class ModelTrainerSIIT:
             ll_hook_fn = make_ll_ablation_hook(node, ll_cache)
             hooks.append((node.name, ll_hook_fn))
         ll_output = self.ll_model.run_with_hooks(b_input, fwd_hooks=hooks)
-        iit_loss = self.loss_fn(ll_output, hl_label)
+        iit_loss = self.loss_fn(ll_output, hl_label.to(float))
 
         #Calculate similarity of hl_output and ll_output.
         # This follows eqn 3 of https://arxiv.org/pdf/2112.00826
@@ -284,7 +285,7 @@ class ModelTrainerSIIT:
                 optimizer.zero_grad()
 
                 with t.no_grad():
-                    _, hl_cache = self.hl_model.run_with_cache(s[0])
+                    _, hl_cache = self.hl_model.run_with_cache((s[0], None, None))
                     _, ll_cache = self.ll_model.run_with_cache(s[0])
         
                 ##########
@@ -335,7 +336,7 @@ class ModelTrainerSIIT:
                     
                     inputs, labels = batch
                     
-                    _, hl_cache = self.hl_model.run_with_cache(s[0])
+                    _, hl_cache = self.hl_model.run_with_cache((s[0], None, None))
                     _, ll_cache = self.ll_model.run_with_cache(s[0])
                     
                     ##########

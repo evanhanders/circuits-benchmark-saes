@@ -213,12 +213,12 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
     #Get Correspondence
     corr = {
         'input_hook' :           [('hook_embed', Ix[[None]],                None)],
-        'left_parens_hook' :     [('blocks.0.attn.hook_result',    Ix[[None, None, 0, None]], None)],
-        'right_parens_hook' :    [('blocks.0.attn.hook_result',    Ix[[None, None, 1, None]], None)],
-        'task_hook':             [('blocks.0.attn.hook_result',    Ix[[None, None, 2, None]], None)],
+        'left_parens_hook' :     [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
+        'right_parens_hook' :    [('blocks.0.attn.hook_z',    Ix[[None, None, 1, None]], None)],
+        'task_hook':             [('blocks.0.attn.hook_z',    Ix[[None, None, 2, None]], None)],
         'mlp0_hook':             [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
         'mlp1_hook' :            [('blocks.1.mlp.hook_post',  Ix[[None]], None)],
-        'horizon_lookback_hook': [('blocks.2.attn.hook_result',    Ix[[None, None, 3, None]], None)],
+        'horizon_lookback_hook': [('blocks.2.attn.hook_z',    Ix[[None, None, 3, None]], None)],
         'output_check_hook' :    [('blocks.2.mlp.hook_post',  Ix[[None]], None)]
     }
     corr_node_dict = {}
@@ -231,9 +231,9 @@ def get_LL_parens_model_and_correspondence( n_ctx: int = 20
     #Get unused nodes
     #TODO: We could further restrict computation subspaces, and this code doesn't allow for that.
     unused_model_labels = [
-        ('blocks.0.attn.hook_result', [3]),
-        ('blocks.1.attn.hook_result', [0, 1, 2, 3]), 
-        ('blocks.2.attn.hook_result', [0, 1, 2])
+        ('blocks.0.attn.hook_z', [3]),
+        ('blocks.1.attn.hook_z', [0, 1, 2, 3]), 
+        ('blocks.2.attn.hook_z', [0, 1, 2])
     ]
     unused_hook_nodes = []
     for label in unused_model_labels:
@@ -300,7 +300,7 @@ def test_HL_parens_balancer_components():
     
 
     balance_checker = HighLevelParensBalanceChecker()
-    output, cache   = balance_checker.run_with_cache(tokens)
+    output, cache   = balance_checker.run_with_cache((tokens, None, None))
     # print(cache['right_parens_hook'] - true_rights)
     assert t.allclose(cache['left_parens_hook'], true_lefts)
     assert t.allclose(cache['right_parens_hook'], true_rights)
@@ -351,7 +351,7 @@ def test_HL_parens_gtr_components():
     
 
     balance_checker = HighLevelParensBalanceChecker()
-    output, cache   = balance_checker.run_with_cache(tokens)
+    output, cache   = balance_checker.run_with_cache((tokens, None, None))
     # print(cache['right_parens_hook'] - true_rights)
     assert t.allclose(cache['left_parens_hook'], true_lefts)
     assert t.allclose(cache['right_parens_hook'], true_rights)
