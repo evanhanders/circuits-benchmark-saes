@@ -22,21 +22,25 @@ class PolyHLModel(HookedRootModule):
             self, 
             hl_models: list[IITHLModel], 
             corrs: list[Correspondence], 
-            cases = list[TracrBenchmarkCase]
+            cases = list[TracrBenchmarkCase],
+            attn_suffix: str = 'attn.hook_z' #force all attn hooks to have the same suffix
             ):
         super().__init__()
         self.hl_models = hl_models
         self.corrs = corrs
         self.cases = cases
 
+
+        self.tracr_d_heads = [mod.W_Q.shape[-1] for mod in self.hl_models]
+        self.tracr_d_mlps = [mod.W_in[0].shape[1] for mod in self.hl_models]
+        self.tracr_d_models = [mod.cfg.d_model for mod in self.hl_models]
+        self.tracr_n_ctx = [mod.cfg.n_ctx for mod in self.hl_models]
+
         self.n_layers = max([mod.cfg.n_layers for mod in self.hl_models])
         self.n_heads = max([mod.cfg.n_heads for mod in self.hl_models])
-        self.n_ctx = max([mod.cfg.n_ctx for mod in self.hl_models]) + 1
-        self.tracr_d_heads = [mod.W_Q.shape[-1] for mod in self.hl_models]
+        self.n_ctx = max(self.tracr_n_ctx) + 1
         self.d_head = max(self.tracr_d_heads)
-        self.tracr_d_mlps = [mod.W_in[0].shape[1] for mod in self.hl_models]
         self.d_mlp = max(self.tracr_d_mlps)
-        self.d_models = [mod.cfg.d_model for mod in self.hl_models]
         self.attn_shapes = []
 
         #make hooks for each necessary attn head and each mlp
@@ -49,7 +53,7 @@ class PolyHLModel(HookedRootModule):
 
         for model_number, corr in enumerate(corrs):
             if corr.suffixes['attn'] == 'attn.hook_result':
-                self.attn_shapes.append(self.d_models[model_number])
+                self.attn_shapes.append(self.tracr_d_models[model_number])
             else:
                 self.attn_shapes.append(self.tracr_d_heads[model_number])
             corr_keys = defaultdict(list)
@@ -100,19 +104,20 @@ class PolyHLModel(HookedRootModule):
                     corr = self.corrs[k]
                     suffixes = corr.suffixes
                     attn_hook_name = f'blocks.{i}.{suffixes["attn"]}'
+                    new_attn_hook_name = f'blocks.{i}.{attn_suffix}'
                     mlp_hook_name = f'blocks.{i}.{suffixes["mlp"]}'
                     if self.corr_prep_dict[attn_hook_name][j][k] is not None:
                         use_attn_head = True
                     if self.corr_prep_dict[mlp_hook_name][k] is not None:
                         use_mlp = True
                 if use_attn_head:
-                    corr_dict[f'attn_hooks.{i}.{j}'] = [(attn_hook_name, Ix[[None,None,j,None]], None),]
+                    corr_dict[f'attn_hooks.{i}.{j}'] = [(new_attn_hook_name, Ix[[None,None,j,None]], None),]
                 elif not task_id_set:
-                    corr_dict[f'task_hook'] = [(attn_hook_name, Ix[[None,None,j,None]], None),]
+                    corr_dict[f'task_hook'] = [(new_attn_hook_name, Ix[[None,None,j,None]], None),]
                     task_id_set = True
                 if use_mlp and j == 0:
                     corr_dict[f'mlp_hooks.{i}'] = [(mlp_hook_name, Ix[[None]], None),]
-        self.corr = Correspondence.make_corr_from_dict(corr_dict)
+        self.corr = Correspondence.make_corr_from_dict(corr_dict, suffixes={'attn': attn_suffix, 'mlp': suffixes['mlp']})
 
         self.setup()
     
@@ -234,6 +239,7 @@ class PolyHLModel(HookedRootModule):
         
             #TODO: Make & return (or store?) a mask for evaluating the loss on the output.
             self.mask[task_ids == i, hl_model.cfg.n_ctx+1:] = False
+            self.weighting = max(self.tracr_n_ctx) / self.mask.sum(dim=1, keepdim=True)
 
         return outputs
     
@@ -247,8 +253,8 @@ class PolyHLModel(HookedRootModule):
         hl_output, ll_output = self.do_intervention(base_input, ablation_input, hl_node)
         label_idx = self.get_label_idxs()
         # IIT loss is only computed on the tokens we care about
-        valid_ll_output = ll_output[label_idx.as_index][self.mask]
-        valid_hl_output = hl_output[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
+        valid_ll_output = (self.weighting*ll_output)[label_idx.as_index][self.mask]
+        valid_hl_output = (self.weighting*hl_output)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
         loss = loss_fn(valid_ll_output, valid_hl_output)
         return loss
 
@@ -261,8 +267,8 @@ class PolyHLModel(HookedRootModule):
         output = self.ll_model(base_x)
         # Apply mask.
         label_idx = self.get_label_idxs()
-        valid_out = output[label_idx.as_index][self.mask]
-        valid_base_y = base_y[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
+        valid_out = (self.weighting*output)[label_idx.as_index][self.mask]
+        valid_base_y = (self.weighting*base_y)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
         behavior_loss = loss_fn(valid_out, valid_base_y)
         return behavior_loss
     
@@ -282,8 +288,8 @@ class PolyHLModel(HookedRootModule):
         )
         # print(out.shape, base_y.shape)
         label_idx = self.get_label_idxs()
-        valid_out = out[label_idx.as_index][self.mask]
-        valid_base_y = base_y[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
+        valid_out = (self.weighting*out)[label_idx.as_index][self.mask]
+        valid_base_y = (self.weighting*base_y)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
         siit_loss = loss_fn(valid_out, valid_base_y) 
         return siit_loss
 
@@ -320,6 +326,8 @@ class PolyHLModel(HookedRootModule):
         output = self.ll_model(base_x)
         output = output[label_idx.as_index][self.mask]
         base_y = base_y[label_idx.as_index][self.mask]
+        
+        #TODO: how to apply weighting here?
         if self.hl_model.is_categorical():
             top1 = torch.argmax(output, dim=-1)
             if output.shape == base_y.shape:
