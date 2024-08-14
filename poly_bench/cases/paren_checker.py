@@ -98,9 +98,9 @@ class CheckElevation(t.nn.Module):
         Returns 1 if so and 0 if false.
     """
 
-    def forward(self, elevations: Int[t.Tensor, "batch seq"]) -> Bool[t.Tensor, "batch"]:
-        elevation_bool = t.ones(elevations.shape[0], dtype=t.bool)
-        elevation_bool[elevations[:,-1].nonzero()] = 0
+    def forward(self, elevations: Int[t.Tensor, "batch seq"]) -> Bool[t.Tensor, "batch seq"]:
+        elevation_bool = t.ones(elevations.shape, dtype=t.bool)
+        elevation_bool[elevations != 0] = 0
         return elevation_bool
 
 class CheckHorizon(t.nn.Module):
@@ -117,9 +117,9 @@ class HorizonLookbackHead(t.nn.Module): #have this be a head that finds the mini
     def forward(
         self, 
         horizon_check: Bool[t.Tensor, "batch seq"]
-    ) -> Bool[t.Tensor, "batch"]:
+    ) -> Bool[t.Tensor, "batch seq"]:
         #this basically just gives True if horizon has never been violated before or now; false if horizon has been violated
-        return t.cumprod(horizon_check, dim=1)[:,-1].bool()
+        return t.cumprod(horizon_check, dim=1).bool()
     
 
 class HighLevelParensBalanceChecker(HookedRootModule):
@@ -197,17 +197,19 @@ class HighLevelParensBalanceChecker(HookedRootModule):
         
         ele_check = self.elevation_checker(elevation)
         hor_check = self.horizon_checker(elevation)
-        hook_mlp1 = self.mlp1_hook(t.cat((ele_check.unsqueeze(1), hor_check), dim=1))
-        ele_check = hook_mlp1[:,0]
-        hor_check = hook_mlp1[:,1:hor_check.shape[1]+1]
+        hook_mlp1 = self.mlp1_hook(t.stack((ele_check, hor_check)))
+        ele_check = hook_mlp1[0]
+        hor_check = hook_mlp1[1]
         hor_lookback = self.horizon_lookback_hook(self.horizon_lookback_head(hor_check))
 
-        output = self.mlp2_hook((ele_check*hor_lookback).to(int))
-        true_output = -99*t.ones((output.shape[0], 1, self.d_vocab)).to(self.device) #make small logits, -99 default.
-        true_output[output == 0, :, 0] = 1
-        true_output[output == 1, :, 1] = 1
+        output = (ele_check*hor_lookback).to(int)
+        output[:,0] = 2
+        output = self.mlp2_hook(output)
         
-        return true_output.float().to(self.device)
+        # output pad at bos spot
+        true_output = t.nn.functional.one_hot(output, num_classes=self.d_vocab).float().to(self.device)
+        
+        return true_output
 
 
 def test_HL_parens_balancer_components():
@@ -240,15 +242,37 @@ def test_HL_parens_balancer_components():
         [ 0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0],
         [ 0, -1, -2, -1, -2, -3, -2, -3, -4, -3, -4],
     ]
-    true_mlp1_check = [ #first element is ele; rest are horizon
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [False,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True,  True, False,  True, False,  True, False,  True, False,  True, False, True],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [False,  True, False, False, False, False, False, False, False, False, False, False],
+    horizon_check = [ #first element is ele; rest are horizon
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
+        [ True, False,  True, False,  True, False,  True, False,  True, False, True],
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
+        [ True, False, False, False, False, False, False, False, False, False, False],
     ]
-    true_hor_lookback = [ True,  True, False, True, False,]
-    true_output  = [ 1, 0, 0, 1, 0, ]
+    elevation_check = [ #True where mlp0_check is 0, false otherwise.
+        [ True, False,  True, False,  True, False,  True,  True,  True,  True,  True],
+        [ True, False, False, False, False, False, False, False, False, False, False],
+        [ True, False,  True, False,  True, False,  True, False,  True, False,  True],
+        [ True, False,  True, False,  True, False,  True, False,  True, False,  True],
+        [ True, False, False, False, False, False, False, False, False, False, False],
+    ]
+    true_mlp1_check = [
+        elevation_check, horizon_check
+    ]
+    true_hor_lookback = [ # For each example, this is False as soon as horizon_check is false once.
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
+        [ True, False, False, False, False, False, False, False, False, False, False],
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
+        [ True, False, False, False, False, False, False, False, False, False, False],
+        ]
+    true_output  = [ # boolean product of true_hor_lookback and elevation_check
+        [ 2, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1],
+        [ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [ 2, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+        [ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ]
 
     tokens = t.Tensor(tokens).to(int)
     true_lefts = t.Tensor(true_lefts).to(int)
@@ -298,19 +322,21 @@ class ParensDatasetBase(ABC):
             })
         
     def passes_balance(self,  sample):
-        return (sample == 0).sum() == (sample == 1).sum()
+        return np.cumsum(sample == 0) == np.cumsum(sample == 1)
         
-    def passes_elevation(self, sample):
+    def passes_horizon(self, sample):
         mod = np.copy(sample)
         mod[mod == 1] = -1
         mod[mod == 0] = 1
-        mod[mod == 2] = 0
-        mod[mod == 3] = 0
-        ele = np.cumsum(mod)
-        return ele.min() >= 0
+        mod[mod > 1] = 0
+        horizon = np.cumsum(mod)
+        horizon_bool = np.ones(horizon.shape, dtype=bool)
+        horizon_bool[horizon < 0] = 0
+        horizon_lookback = np.cumprod(horizon_bool)
+        return horizon_lookback.astype(bool)
     
     def passes_balance_test(self, sample):
-        return self.passes_balance(sample)*self.passes_elevation(sample)
+        return self.passes_balance(sample)*self.passes_horizon(sample)
     
     @abstractmethod
     def generate_tokens(self):
@@ -322,20 +348,16 @@ class ParensDatasetBase(ABC):
         self.str_tokens = vectorized_map(self.tokens)
 
     def generate_labels(self):
-        new_markers = np.zeros(self.tokens.shape[0], dtype=int)
+        new_markers = np.zeros(self.tokens.shape, dtype=int)
         for i,sample in enumerate(self.tokens):
             sample = sample[1:]
-            if self.passes_balance_test(sample):
-                new_markers[i] = 1
-            elif (not self.passes_balance(sample)) and self.passes_elevation(sample):
-                new_markers[i] = 2
-            elif (not self.passes_elevation(sample)) and self.passes_balance(sample):
-                new_markers[i] = 3
-            else:
-                new_markers[i] = 0 #fails
+            new_markers[i,1:][self.passes_balance_test(sample)] = 1
+            new_markers[i,1:][np.logical_and(~self.passes_balance(sample), self.passes_horizon(sample))] = 2
+            new_markers[i,1:][np.logical_and(~self.passes_horizon(sample), self.passes_balance(sample))] = 3
         self.markers = new_markers
         self.labels = np.copy(self.markers)
         self.labels[self.labels != 1] = 0 #passes or fails.
+        self.labels[:,0] = 2 #set pad as answer for bos token.
         self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=4).float().numpy()
 
     def get_dataset(self):
@@ -343,13 +365,10 @@ class ParensDatasetBase(ABC):
     
     def get_IIT_train_test_set(self, train_frac=0.8, seed=0):
 
-        
-
-
         decorated_dset = CustomDataset(
             inputs = self.dataset['tokens'],
-            targets = np.array(self.dataset['labels'])[:, None],
-            markers = np.array(self.dataset['markers'])[:, None]
+            targets = np.array(self.dataset['labels']),#[:, None],
+            markers = np.array(self.dataset['markers'])#[:, None]
         )
 
         print("making IIT dataset")
@@ -370,7 +389,7 @@ class BalancedParensDataset(ParensDatasetBase):
         np.random.seed(seed)
         super().__init__(N_samples, n_ctx)
 
-    def _generate_token_subset(self, N_samples, n_ctx, passes_balance=True, passes_elevation=True):
+    def _generate_token_subset(self, N_samples, n_ctx, passes_balance=True, passes_horizon=True):
         """ Samples that fail both tests """
         assert n_ctx % 2 == 0, "n_ctx must be even."
         
@@ -405,7 +424,7 @@ class BalancedParensDataset(ParensDatasetBase):
             min_values, _ = t.min(elevation, dim=1)
             
             # Step 6: Create appropriate mask for pass/fail on task
-            if passes_elevation:
+            if passes_horizon:
                 mask = min_values >= 0
             else:
                 mask = min_values < 0
@@ -416,22 +435,22 @@ class BalancedParensDataset(ParensDatasetBase):
         return t.unique(t.cat(good_samples, dim=0), dim=0)
         
     def _generate_balanced_tokens(self, N_samples, n_ctx):
-        return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_elevation=True)
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_horizon=True)
 
-    def _generate_elevation_failures(self, N_samples, n_ctx):
-        return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_elevation=False)
+    def _generate_horizon_failures(self, N_samples, n_ctx):
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_horizon=False)
         
     def _generate_balance_failures(self, N_samples, n_ctx):
-        return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_elevation=True)
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_horizon=True)
         
     def _generate_absolute_failures(self, N_samples, n_ctx):
-        return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_elevation=False)
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_horizon=False)
         
     def generate_tokens(self):
 
         #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
         balanced = self._generate_balanced_tokens(self.N_samples, self.n_ctx - 2)
-        fail_ele = self._generate_elevation_failures(self.N_samples // 2, self.n_ctx - 2)
+        fail_ele = self._generate_horizon_failures(self.N_samples // 2, self.n_ctx - 2)
         fail_bal = self._generate_balance_failures(self.N_samples // 2, self.n_ctx - 2)
         fail_both = self._generate_absolute_failures(self.N_samples // 2, self.n_ctx - 2)
 
