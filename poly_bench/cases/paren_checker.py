@@ -1,14 +1,11 @@
 from abc import ABC, abstractmethod 
 from jaxtyping import Float, Int, Bool
-from typing import Optional, Callable, Tuple
+from typing import Optional
 
 import torch as t
-from torch.utils.data import ConcatDataset
 import numpy as np
 from datasets import Dataset
-from tqdm.notebook import tqdm
 
-from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, decoders, trainers
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 from transformer_lens.HookedTransformer import HookedTransformer
 from transformer_lens.hook_points import HookedRootModule, HookPoint
@@ -17,6 +14,8 @@ from iit.utils.correspondence import Correspondence, HLNode, LLNode
 from iit.utils.index import Ix
 from iit.utils.iit_dataset import train_test_split
 from iit.utils.iit_dataset import IITDataset
+
+from .utils import CustomDataset, create_tokenizer
 
 
 PAREN_VOCAB = {
@@ -29,28 +28,17 @@ PAREN_VOCAB = {
 
 PAREN_REVERSE_VOCAB = {v: k for k, v in PAREN_VOCAB.items()}
 
-class CustomDataset(Dataset):
-    def __init__(self, inputs, targets, markers):
-        """
-        Args:
-            inputs (list or numpy array): List or array of input data.
-            targets (list or numpy array): List or array of target data.
-        """
-        self.inputs = t.tensor(inputs).to(int)
-        self.targets = t.tensor(targets).to(t.float32)
-        self.markers = t.tensor(markers).to(int)
-
-    def __len__(self):
-        return len(self.inputs)
-
-    def __getitem__(self, idx):
-        """
-        Args:
-            idx (int): Index
-        Returns:
-            tuple: (input tensor, target tensor)
-        """
-        return self.inputs[idx], self.targets[idx], self.markers[idx]
+def create_paren_checker_tokenizer() -> PreTrainedTokenizerFast:
+    # create tokenizer
+    # Define your simple vocabulary
+    hf_tokenizer = create_tokenizer(PAREN_VOCAB)
+    
+    # Test the tokenizer
+    encoded = hf_tokenizer.encode("BOS ( ) ( ) PAD PAD PAD")
+    decoded = hf_tokenizer.decode(encoded)
+    print(f"Encoded: {encoded}")
+    print(f"Decoded: {decoded}")
+    return hf_tokenizer
 
 class LeftParenCountHead(t.nn.Module):
     """ Calculates how many left parens are in the series up to this token """
@@ -71,12 +59,6 @@ class RightParenCountHead(t.nn.Module):
     """ Calculates how many right parens are in the series up to this token """
 
     def forward(self, tokens: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch seq"]:
-        """ Vocabulary:
-                0 - [START]
-                1 - (
-                2 - )
-                3 - [PAD]
-        """
         #tok_clone is 1 for ( and -1 for )
         tok_clone = tokens.clone()
         tok_clone[tok_clone == 1] = 1 #)
@@ -153,9 +135,9 @@ class HighLevelParensBalanceChecker(HookedRootModule):
     def get_ll_model_cfg(self) -> HookedTransformerConfig:
         return HookedTransformerConfig(
             n_layers = 3,
-            d_model = 32,
+            d_model = 20,
             n_ctx = 22,
-            d_head = 8,
+            d_head = 5,
             d_vocab = self.d_vocab,
             act_fn = "relu"
         )
@@ -205,7 +187,7 @@ class HighLevelParensBalanceChecker(HookedRootModule):
         output = (ele_check*hor_lookback).to(int)
         output[:,0] = 2
         output = self.mlp2_hook(output)
-        
+
         # output pad at bos spot
         true_output = t.nn.functional.one_hot(output, num_classes=self.d_vocab).float().to(self.device)
         
@@ -470,34 +452,3 @@ class BalancedParensDataset(ParensDatasetBase):
             dataset, 
             PAREN_REVERSE_VOCAB[' PAD']*np.ones((dataset.shape[0], 1)) #pad
         ], axis=1).astype(int)
-
-def create_tokenizer(vocab: dict) -> PreTrainedTokenizerFast:
-    # Create a Tokenizer with a WordLevel model
-    tokenizer = Tokenizer(models.WordLevel(vocab=vocab, unk_token="UNK"))
-    
-    # Set the normalizer, pre-tokenizer, and decoder
-    tokenizer.normalizer = normalizers.Sequence([normalizers.Lowercase(), normalizers.StripAccents()])
-    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-    
-    # Convert to Hugging Face tokenizer
-    hf_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
-    
-    # Add the special tokens to the Hugging Face tokenizer
-    hf_tokenizer.add_special_tokens({
-        'unk_token': ' UNK',
-        'bos_token': 'BOS',
-        'pad_token': ' PAD',
-    })
-    return hf_tokenizer
-
-def create_paren_checker_tokenizer() -> PreTrainedTokenizerFast:
-    # create tokenizer
-    # Define your simple vocabulary
-    hf_tokenizer = create_tokenizer(PAREN_VOCAB)
-    
-    # Test the tokenizer
-    encoded = hf_tokenizer.encode("BOS ( ) ( ) PAD PAD PAD")
-    decoded = hf_tokenizer.decode(encoded)
-    print(f"Encoded: {encoded}")
-    print(f"Decoded: {decoded}")
-    return hf_tokenizer
