@@ -7,34 +7,35 @@ import numpy as np
 from datasets import Dataset
 from tqdm.notebook import tqdm
 
-from tokenizers import Tokenizer, models, normalizers, pre_tokenizers
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 from transformer_lens.HookedTransformer import HookedTransformer
 from transformer_lens.hook_points import HookedRootModule, HookPoint
 from transformers import PreTrainedTokenizerFast
+from transformer_lens.utils import get_device
 from iit.utils.correspondence import Correspondence, HLNode, LLNode
 from iit.utils.index import Ix
 from iit.utils.iit_dataset import train_test_split
 from iit.utils.iit_dataset import IITDataset
 
-from .utils import CustomDataset, create_tokenizer
+from .utils import create_tokenizer
+from .poly_case import PolyCase, PolyBenchDataset
 
 
-PAREN_VOCAB = {
-        0: '(', 
-        1: ')', 
-        2: ' PAD', 
-        3: 'BOS', 
-        4: ' UNK'
+CASE_VOCAB = {
+        '(': 0, 
+        ')': 1, 
+        'PAD': 2, 
+        'BOS': 3, 
+        'UNK': 4
         } 
 
-PAREN_REVERSE_VOCAB = {v: k for k, v in PAREN_VOCAB.items()}
+CASE_REVERSE_VOCAB = {v: k for k, v in CASE_VOCAB.items()}
 
 
 def create_left_greater_tokenizer() -> PreTrainedTokenizerFast:
     # create tokenizer
     # Define your simple vocabulary
-    hf_tokenizer = create_tokenizer(PAREN_VOCAB)
+    hf_tokenizer = create_tokenizer(CASE_VOCAB)
     
     # Test the tokenizer
     encoded = hf_tokenizer.encode("BOS ( ) ( ) PAD PAD PAD")
@@ -64,21 +65,19 @@ class GreaterThan(t.nn.Module):
         return lefts > rights
 
 
-class HighLevelLeftGreater(HookedRootModule):
+class HighLevelLeftGreater(PolyCase):
 
-    def __init__(self, device='cpu', d_vocab=4):
-        super().__init__()
-        self.d_vocab = d_vocab
+    def __init__(self, vocab_dict: dict[str, int] = CASE_VOCAB, device: str = get_device()):
+        super().__init__(vocab_dict=vocab_dict, device=device)
         
         self.input_hook = HookPoint()
-        self.left_parens = TokenCountHead(PAREN_REVERSE_VOCAB['('])
-        self.right_parens =TokenCountHead(PAREN_REVERSE_VOCAB[')'])
+        self.left_parens = TokenCountHead(self.vocab_dict['('])
+        self.right_parens =TokenCountHead(self.vocab_dict[')'])
         self.paren_counts_hook = HookPoint()
 
         self.greater_than = GreaterThan()
         self.mlp0_hook = HookPoint()
 
-        self.device = device
         self.setup()
     
     def get_ll_model_cfg(self) -> HookedTransformerConfig:
@@ -131,6 +130,85 @@ class HighLevelLeftGreater(HookedRootModule):
         
         return true_output
 
+class LeftGreaterDataset(PolyBenchDataset):
+    
+    def __init__(
+        self, 
+        N_samples: int, 
+        map_dict: Optional[dict[str, int]] = CASE_VOCAB,
+        n_ctx: Optional[int] = 15,
+        seed: int = 42,
+    ):
+        super().__init__(
+            N_samples=N_samples, 
+            map_dict=map_dict, 
+            n_ctx=n_ctx, 
+            seed=seed
+            )
+        
+    def left_greater(self,  sample):
+        return np.cumsum(sample == 0) > np.cumsum(sample == 1)
+
+    def _generate_token_subset(self, N_samples, n_ctx, left_greater=True):        
+        generated_samples = min(N_samples, 1000)
+        remaining_samples = N_samples
+        good_samples = []
+        while remaining_samples > 0:
+            if left_greater:
+                pos_lengths = t.randint(n_ctx//2+1, n_ctx, (generated_samples,))
+            else:
+                pos_lengths = t.randint(0, n_ctx//2, (generated_samples,))
+            neg_lengths = n_ctx - pos_lengths
+
+            samples = [ t.cat((
+                t.ones((p.item())),
+                -t.ones((n.item()))
+            )) for p, n in zip(pos_lengths, neg_lengths)]
+            samples = t.stack(samples)
+            
+            # shuffle
+            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
+            shuffled = t.gather(samples, 1, indices)
+            good_samples.append(shuffled)
+            remaining_samples -= good_samples[-1].shape[0]
+            
+        return t.unique(t.cat(good_samples, dim=0), dim=0)
+        
+    def _generate_left_greater(self, N_samples, n_ctx):
+        return self._generate_token_subset(N_samples, n_ctx, left_greater=True)
+    
+    def _generate_left_not_greater(self, N_samples, n_ctx):
+        return self._generate_token_subset(N_samples, n_ctx, left_greater=False)
+
+    def generate_tokens(self):
+
+        #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
+        greater = self._generate_token_subset(self.N_samples, self.n_ctx - 1, left_greater=True)
+        less = self._generate_token_subset(self.N_samples, self.n_ctx - 1, left_greater=False)
+
+        dataset = t.cat([
+            greater[:self.N_samples // 2],
+            less[:self.N_samples // 2],
+        ], dim = 0)
+        dataset[dataset == 1]  = 0 #(
+        dataset[dataset == -1] = 1 #)
+        dataset = dataset[t.randperm(dataset.shape[0]),:] #shuffle the dataset.
+
+        #add BOS token to beginning and pad to end
+        self.tokens = np.concatenate([
+            self.map_dict['BOS']*np.ones((dataset.shape[0], 1)), #BOS
+            dataset,
+        ], axis=1).astype(int)
+
+    def generate_labels(self):
+        new_markers = np.zeros(self.tokens.shape, dtype=int)
+        for i,sample in enumerate(self.tokens):
+            sample = sample[1:]
+            new_markers[i,1:][self.left_greater(sample)] = 1
+        self.markers = new_markers
+        self.labels = np.copy(self.markers)
+        self.labels[:,0] = 2 #set pad as answer for bos token.
+        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=4).float().numpy()
 
 
 def test_HL_left_greater_components():
@@ -182,129 +260,8 @@ def test_HL_left_greater_components():
     output, cache   = checker.run_with_cache((tokens, None, None))
     assert t.allclose(cache['paren_counts_hook'], true_parens)
     assert t.allclose(cache['mlp0_hook'], true_mlp0_check)
-    assert t.allclose(output, true_output)
+    assert t.allclose(output.cpu(), true_output)
     print("All left greater tests passed!")
 
     return True
 
-
-class LeftGreaterDataset:
-    
-    def __init__(
-        self, 
-        N_samples: int, 
-        n_ctx: Optional[int] = None,
-        seed: int = 42
-    ):
-        np.random.seed(seed)
-        self.N_samples = N_samples
-        self.n_ctx = n_ctx
-        self.map_dict = PAREN_VOCAB
-
-        #generate lists of self.str_tokens and self.tokens:
-        self.generate_tokens()
-        self.map_tokens_to_str()
-
-        #generate labels
-        self.generate_labels()
-
-        self.dataset = Dataset.from_dict({
-                'tokens' : self.tokens,
-                'str_tokens' : self.str_tokens,
-                'labels': self.labels,
-                'markers' : self.markers
-            })
-        
-    def left_greater(self,  sample):
-        return np.cumsum(sample == 0) > np.cumsum(sample == 1)
-    
-    
-
-    def _generate_token_subset(self, N_samples, n_ctx, left_greater=True):
-        """ Samples that fail both tests """
-        assert n_ctx % 2 == 0, "n_ctx must be even."
-        
-        generated_samples = min(N_samples, 1000)
-        remaining_samples = N_samples
-        good_samples = []
-        while remaining_samples > 0:
-            if left_greater:
-                pos_lengths = t.randint(n_ctx//2+1, n_ctx, (generated_samples,))
-            else:
-                pos_lengths = t.randint(0, n_ctx//2, (generated_samples,))
-            neg_lengths = n_ctx - pos_lengths
-
-            samples = [ t.cat((
-                t.ones((p.item())),
-                -t.ones((n.item()))
-            )) for p, n in zip(pos_lengths, neg_lengths)]
-            samples = t.stack(samples)
-            
-            # shuffle
-            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
-            shuffled = t.gather(samples, 1, indices)
-            good_samples.append(shuffled)
-            remaining_samples -= good_samples[-1].shape[0]
-            
-        return t.unique(t.cat(good_samples, dim=0), dim=0)
-        
-    def _generate_left_greater(self, N_samples, n_ctx):
-        return self._generate_token_subset(N_samples, n_ctx, left_greater=True)
-    
-    def _generate_left_not_greater(self, N_samples, n_ctx):
-        return self._generate_token_subset(N_samples, n_ctx, left_greater=False)
-
-    def generate_tokens(self):
-
-        #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
-        greater = self._generate_token_subset(self.N_samples, self.n_ctx - 3, left_greater=True)
-        less = self._generate_token_subset(self.N_samples, self.n_ctx - 3, left_greater=False)
-
-        dataset = t.cat([
-            greater[:self.N_samples // 2],
-            less[:self.N_samples // 2],
-        ], dim = 0)
-        dataset[dataset == 1]  = 0 #(
-        dataset[dataset == -1] = 1 #)
-        dataset = dataset[t.randperm(dataset.shape[0]),:] #shuffle the dataset.
-
-        #add BOS token to beginning and pad to end
-        self.tokens = np.concatenate([
-            PAREN_REVERSE_VOCAB['BOS']*np.ones((dataset.shape[0], 1)), #BOS
-            dataset, 
-            PAREN_REVERSE_VOCAB[' PAD']*np.ones((dataset.shape[0], 1)) #pad
-        ], axis=1).astype(int)
-
-    def map_tokens_to_str(self):
-        # Vectorized mapping using numpy
-        vectorized_map = np.vectorize(self.map_dict.get)
-        self.str_tokens = vectorized_map(self.tokens)
-
-    def generate_labels(self):
-        new_markers = np.zeros(self.tokens.shape, dtype=int)
-        for i,sample in enumerate(self.tokens):
-            sample = sample[1:]
-            new_markers[i,1:][self.left_greater(sample)] = 1
-        self.markers = new_markers
-        self.labels = np.copy(self.markers)
-        self.labels[:,0] = 2 #set pad as answer for bos token.
-        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=4).float().numpy()
-
-    def get_dataset(self):
-        return self.dataset
-    
-    def get_IIT_train_test_set(self, train_frac=0.8, seed=0):
-
-        decorated_dset = CustomDataset(
-            inputs = self.dataset['tokens'],
-            targets = np.array(self.dataset['labels']),
-            markers = np.array(self.dataset['markers'])
-        )
-
-        print("making IIT dataset")
-        train_dataset, test_dataset = train_test_split(
-            decorated_dset, test_size=1-train_frac, random_state=42
-        )
-        train_set = IITDataset(train_dataset, train_dataset, seed=seed)
-        test_set = IITDataset(test_dataset, test_dataset, seed=seed)
-        return train_set, test_set

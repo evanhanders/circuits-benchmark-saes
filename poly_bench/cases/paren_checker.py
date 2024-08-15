@@ -9,29 +9,29 @@ from datasets import Dataset
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 from transformer_lens.HookedTransformer import HookedTransformer
 from transformer_lens.hook_points import HookedRootModule, HookPoint
+from transformer_lens.utils import get_device
 from transformers import PreTrainedTokenizerFast
 from iit.utils.correspondence import Correspondence, HLNode, LLNode
 from iit.utils.index import Ix
-from iit.utils.iit_dataset import train_test_split
-from iit.utils.iit_dataset import IITDataset
 
-from .utils import CustomDataset, create_tokenizer
+from .utils import create_tokenizer
+from .poly_case import PolyCase, PolyBenchDataset
 
 
-PAREN_VOCAB = {
-        0: '(', 
-        1: ')', 
-        2: ' PAD', 
-        3: 'BOS', 
-        4: ' UNK'
+CASE_VOCAB = {
+        '(': 0, 
+        ')': 1, 
+        'PAD': 2, 
+        'BOS': 3, 
+        'UNK': 4
         } 
 
-PAREN_REVERSE_VOCAB = {v: k for k, v in PAREN_VOCAB.items()}
+CASE_REVERSE_VOCAB = {v: k for k, v in CASE_VOCAB.items()}
 
 def create_paren_checker_tokenizer() -> PreTrainedTokenizerFast:
     # create tokenizer
     # Define your simple vocabulary
-    hf_tokenizer = create_tokenizer(PAREN_VOCAB)
+    hf_tokenizer = create_tokenizer(CASE_VOCAB)
     
     # Test the tokenizer
     encoded = hf_tokenizer.encode("BOS ( ) ( ) PAD PAD PAD")
@@ -87,15 +87,14 @@ class HorizonLookbackHead(t.nn.Module): #have this be a head that finds the mini
         #this basically just gives True if horizon has never been violated before or now; false if horizon has been violated
         return t.cumprod(horizon_check, dim=1).bool()
 
-class HighLevelParensBalanceChecker(HookedRootModule):
+class HighLevelParensBalanceChecker(PolyCase):
 
-    def __init__(self, device='cpu', d_vocab=4):
-        super().__init__()
-        self.d_vocab = d_vocab
+    def __init__(self, vocab_dict: Optional[dict[str, int]] = CASE_VOCAB, device=get_device()):
+        super().__init__(vocab_dict, device=device)
         
         self.input_hook = HookPoint()
-        self.left_parens = TokenCountHead(PAREN_REVERSE_VOCAB['('])
-        self.right_parens = TokenCountHead(PAREN_REVERSE_VOCAB[')'])
+        self.left_parens = TokenCountHead(self.vocab_dict['('])
+        self.right_parens = TokenCountHead(self.vocab_dict[')'])
         self.paren_counts_hook = HookPoint()
 
         self.elevation_calc = ElevationCalculator()
@@ -111,14 +110,13 @@ class HighLevelParensBalanceChecker(HookedRootModule):
         self.horizon_lookback_head = HorizonLookbackHead()
         self.horizon_lookback_hook = HookPoint()
 
-        self.device = device
         self.setup()
     
     def get_ll_model_cfg(self) -> HookedTransformerConfig:
         return HookedTransformerConfig(
             n_layers = 3,
             d_model = 20,
-            n_ctx = 22,
+            n_ctx = 21,
             d_head = 5,
             d_vocab = self.d_vocab,
             act_fn = "relu"
@@ -152,8 +150,8 @@ class HighLevelParensBalanceChecker(HookedRootModule):
         tokens, _, _ = inputs
         tokens = self.input_hook(tokens)
 
-        left_parens = self.left_parens_hook(self.left_parens(tokens))
-        right_parens = self.right_parens_hook(self.right_parens(tokens))
+        left_parens = self.left_parens(tokens)
+        right_parens = self.right_parens(tokens)
         parens_counts = self.paren_counts_hook(t.stack((left_parens, right_parens)))
         left_parens = parens_counts[0]
         right_parens = parens_counts[1]
@@ -176,6 +174,133 @@ class HighLevelParensBalanceChecker(HookedRootModule):
         true_output = t.nn.functional.one_hot(output, num_classes=self.d_vocab).float().to(self.device)
         
         return true_output
+
+
+class BalancedParensDataset(PolyBenchDataset):
+    def __init__(
+        self, 
+        N_samples: int, 
+        map_dict: Optional[dict[str, int]] = CASE_VOCAB,
+        n_ctx: Optional[int] = 40,
+        seed: int = 42,
+    ):
+        super().__init__(
+            N_samples=N_samples, 
+            map_dict=map_dict, 
+            n_ctx=n_ctx, 
+            seed=seed
+            )
+
+    def passes_balance(self,  sample):
+        return np.cumsum(sample == 0) == np.cumsum(sample == 1)
+        
+    def passes_horizon(self, sample):
+        mod = np.copy(sample)
+        mod[mod == 1] = -1
+        mod[mod == 0] = 1
+        mod[mod > 1] = 0
+        horizon = np.cumsum(mod)
+        horizon_bool = np.ones(horizon.shape, dtype=bool)
+        horizon_bool[horizon < 0] = 0
+        horizon_lookback = np.cumprod(horizon_bool)
+        return horizon_lookback.astype(bool)
+    
+    def passes_balance_test(self, sample):
+        return self.passes_balance(sample)*self.passes_horizon(sample)
+
+    def _generate_token_subset(self, N_samples, n_ctx, passes_balance=True, passes_horizon=True):
+        """ Samples that fail both tests """
+        assert n_ctx % 2 == 0, "n_ctx must be even."
+        
+        generated_samples = min(N_samples, 1000)
+        remaining_samples = N_samples
+        good_samples = []
+        while remaining_samples > 0:
+            if passes_balance:
+                pos_lengths = (n_ctx//2) * t.ones(generated_samples).to(int)
+                neg_lengths = pos_lengths
+            else:
+                # Generate +1 and -1 tensors so we ensure imbalance
+                # There's def a smarter way to do this with just generating the ones and then indexing.
+                coin_flip = t.randint(0, 2, (generated_samples,))
+                #Generate all from 0 - n_ctx//2 - 1
+                pos_lengths = t.randint(0, n_ctx//2, (generated_samples,))
+                #use coin flip to flip half to range n_ctx//2 + 1 -> n_ctx
+                pos_lengths[coin_flip == 0] = t.randint(n_ctx//2 + 1, n_ctx, ((coin_flip == 0).sum(),))
+                neg_lengths = n_ctx - pos_lengths
+            samples = [ t.cat((
+                t.ones((p.item())),
+                -t.ones((n.item()))
+            )) for p, n in zip(pos_lengths, neg_lengths)]
+            samples = t.stack(samples)
+            
+            # shuffle
+            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
+            shuffled = t.gather(samples, 1, indices)
+
+            # create random elevations
+            elevation = t.cumsum(shuffled, dim=1)
+            min_values, _ = t.min(elevation, dim=1)
+            
+            # Step 6: Create appropriate mask for pass/fail on task
+            if passes_horizon:
+                mask = min_values >= 0
+            else:
+                mask = min_values < 0
+            masked_samples = shuffled[mask,:]
+            good_samples.append(masked_samples[:remaining_samples])
+            remaining_samples -= good_samples[-1].shape[0]
+            
+        return t.unique(t.cat(good_samples, dim=0), dim=0)
+        
+    def _generate_balanced_tokens(self, N_samples, n_ctx):
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_horizon=True)
+
+    def _generate_horizon_failures(self, N_samples, n_ctx):
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_horizon=False)
+        
+    def _generate_balance_failures(self, N_samples, n_ctx):
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_horizon=True)
+        
+    def _generate_absolute_failures(self, N_samples, n_ctx):
+        return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_horizon=False)
+        
+    def generate_tokens(self):
+
+        #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
+        balanced = self._generate_balanced_tokens(self.N_samples, self.n_ctx - 1)
+        fail_ele = self._generate_horizon_failures(self.N_samples // 2, self.n_ctx - 1)
+        fail_bal = self._generate_balance_failures(self.N_samples // 2, self.n_ctx - 1)
+        fail_both = self._generate_absolute_failures(self.N_samples // 2, self.n_ctx - 1)
+
+        dataset = t.cat([
+            balanced[:self.N_samples // 4],
+            fail_ele[:self.N_samples // 4],
+            fail_bal[:self.N_samples // 4],
+            fail_both[:self.N_samples // 4]
+        ], dim = 0)
+        dataset[dataset == 1]  = 0 #(
+        dataset[dataset == -1] = 1 #)
+        dataset = dataset[t.randperm(dataset.shape[0]),:] #shuffle the dataset.
+
+        #add BOS token to beginning and pad to end
+        self.tokens = np.concatenate([
+            self.map_dict['BOS']*np.ones((dataset.shape[0], 1)), #BOS
+            dataset,
+        ], axis=1).astype(int)
+    
+    def generate_labels(self):
+        new_markers = np.zeros(self.tokens.shape, dtype=int)
+        for i,sample in enumerate(self.tokens):
+            sample = sample[1:]
+            new_markers[i,1:][self.passes_balance_test(sample)] = 1
+            new_markers[i,1:][np.logical_and(~self.passes_balance(sample), self.passes_horizon(sample))] = 2
+            new_markers[i,1:][np.logical_and(~self.passes_horizon(sample), self.passes_balance(sample))] = 3
+        self.markers = new_markers
+        self.labels = np.copy(self.markers)
+        self.labels[self.labels != 1] = 0 #passes or fails.
+        self.labels[:,0] = 2 #set pad as answer for bos token.
+        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=4).float().numpy()
 
 
 def test_HL_parens_balancer_components():
@@ -254,8 +379,6 @@ def test_HL_parens_balancer_components():
     _, cache   = checker.run_with_cache((tokens, None, None))
     # print(cache['right_parens_hook'] - true_rights)
     assert t.allclose(cache['paren_counts_hook'], true_parens_counts)
-    # assert t.allclose(cache['left_parens_hook'], true_lefts)
-    # assert t.allclose(cache['right_parens_hook'], true_rights)
     assert t.allclose(cache['mlp0_hook'], true_mlp0_check)
     assert t.allclose(cache['mlp1_hook'], true_mlp1_check)
     assert t.allclose(cache['horizon_lookback_hook'], true_hor_lookback)
@@ -263,178 +386,3 @@ def test_HL_parens_balancer_components():
     print("All Balance tests passed!")
 
     return True
-
-class ParensDatasetBase(ABC):
-    
-    def __init__(
-        self, 
-        N_samples: int, 
-        n_ctx: Optional[int] = None
-    ):
-        self.N_samples = N_samples
-        self.n_ctx = n_ctx
-        self.map_dict = PAREN_VOCAB
-
-        #generate lists of self.str_tokens and self.tokens:
-        self.generate_tokens()
-        self.map_tokens_to_str()
-
-        #generate labels
-        self.generate_labels()
-
-        self.dataset = Dataset.from_dict({
-                'tokens' : self.tokens,
-                'str_tokens' : self.str_tokens,
-                'labels': self.labels,
-                'markers' : self.markers
-            })
-        
-    def passes_balance(self,  sample):
-        return np.cumsum(sample == 0) == np.cumsum(sample == 1)
-        
-    def passes_horizon(self, sample):
-        mod = np.copy(sample)
-        mod[mod == 1] = -1
-        mod[mod == 0] = 1
-        mod[mod > 1] = 0
-        horizon = np.cumsum(mod)
-        horizon_bool = np.ones(horizon.shape, dtype=bool)
-        horizon_bool[horizon < 0] = 0
-        horizon_lookback = np.cumprod(horizon_bool)
-        return horizon_lookback.astype(bool)
-    
-    def passes_balance_test(self, sample):
-        return self.passes_balance(sample)*self.passes_horizon(sample)
-    
-    @abstractmethod
-    def generate_tokens(self):
-        pass
-
-    def map_tokens_to_str(self):
-        # Vectorized mapping using numpy
-        vectorized_map = np.vectorize(self.map_dict.get)
-        self.str_tokens = vectorized_map(self.tokens)
-
-    def generate_labels(self):
-        new_markers = np.zeros(self.tokens.shape, dtype=int)
-        for i,sample in enumerate(self.tokens):
-            sample = sample[1:]
-            new_markers[i,1:][self.passes_balance_test(sample)] = 1
-            new_markers[i,1:][np.logical_and(~self.passes_balance(sample), self.passes_horizon(sample))] = 2
-            new_markers[i,1:][np.logical_and(~self.passes_horizon(sample), self.passes_balance(sample))] = 3
-        self.markers = new_markers
-        self.labels = np.copy(self.markers)
-        self.labels[self.labels != 1] = 0 #passes or fails.
-        self.labels[:,0] = 2 #set pad as answer for bos token.
-        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=4).float().numpy()
-
-    def get_dataset(self):
-        return self.dataset
-    
-    def get_IIT_train_test_set(self, train_frac=0.8, seed=0):
-
-        decorated_dset = CustomDataset(
-            inputs = self.dataset['tokens'],
-            targets = np.array(self.dataset['labels']),#[:, None],
-            markers = np.array(self.dataset['markers'])#[:, None]
-        )
-
-        print("making IIT dataset")
-        train_dataset, test_dataset = train_test_split(
-            decorated_dset, test_size=1-train_frac, random_state=42
-        )
-        train_set = IITDataset(train_dataset, train_dataset, seed=seed)
-        test_set = IITDataset(test_dataset, test_dataset, seed=seed)
-        return train_set, test_set
-
-class BalancedParensDataset(ParensDatasetBase):
-    def __init__(
-        self, 
-        N_samples: int, 
-        n_ctx: int = 40,
-        seed: int = 42
-    ):
-        np.random.seed(seed)
-        super().__init__(N_samples, n_ctx)
-
-    def _generate_token_subset(self, N_samples, n_ctx, passes_balance=True, passes_horizon=True):
-        """ Samples that fail both tests """
-        assert n_ctx % 2 == 0, "n_ctx must be even."
-        
-        generated_samples = min(N_samples, 1000)
-        remaining_samples = N_samples
-        good_samples = []
-        while remaining_samples > 0:
-            if passes_balance:
-                pos_lengths = (n_ctx//2) * t.ones(generated_samples).to(int)
-                neg_lengths = pos_lengths
-            else:
-                # Generate +1 and -1 tensors so we ensure imbalance
-                # There's def a smarter way to do this with just generating the ones and then indexing.
-                coin_flip = t.randint(0, 2, (generated_samples,))
-                #Generate all from 0 - n_ctx//2 - 1
-                pos_lengths = t.randint(0, n_ctx//2, (generated_samples,))
-                #use coin flip to flip half to range n_ctx//2 + 1 -> n_ctx
-                pos_lengths[coin_flip == 0] = t.randint(n_ctx//2 + 1, n_ctx, ((coin_flip == 0).sum(),))
-                neg_lengths = n_ctx - pos_lengths
-            samples = [ t.cat((
-                t.ones((p.item())),
-                -t.ones((n.item()))
-            )) for p, n in zip(pos_lengths, neg_lengths)]
-            samples = t.stack(samples)
-            
-            # shuffle
-            indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
-            shuffled = t.gather(samples, 1, indices)
-
-            # create random elevations
-            elevation = t.cumsum(shuffled, dim=1)
-            min_values, _ = t.min(elevation, dim=1)
-            
-            # Step 6: Create appropriate mask for pass/fail on task
-            if passes_horizon:
-                mask = min_values >= 0
-            else:
-                mask = min_values < 0
-            masked_samples = shuffled[mask,:]
-            good_samples.append(masked_samples[:remaining_samples])
-            remaining_samples -= good_samples[-1].shape[0]
-            
-        return t.unique(t.cat(good_samples, dim=0), dim=0)
-        
-    def _generate_balanced_tokens(self, N_samples, n_ctx):
-        return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_horizon=True)
-
-    def _generate_horizon_failures(self, N_samples, n_ctx):
-        return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_horizon=False)
-        
-    def _generate_balance_failures(self, N_samples, n_ctx):
-        return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_horizon=True)
-        
-    def _generate_absolute_failures(self, N_samples, n_ctx):
-        return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_horizon=False)
-        
-    def generate_tokens(self):
-
-        #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
-        balanced = self._generate_balanced_tokens(self.N_samples, self.n_ctx - 2)
-        fail_ele = self._generate_horizon_failures(self.N_samples // 2, self.n_ctx - 2)
-        fail_bal = self._generate_balance_failures(self.N_samples // 2, self.n_ctx - 2)
-        fail_both = self._generate_absolute_failures(self.N_samples // 2, self.n_ctx - 2)
-
-        dataset = t.cat([
-            balanced[:self.N_samples // 4],
-            fail_ele[:self.N_samples // 4],
-            fail_bal[:self.N_samples // 4],
-            fail_both[:self.N_samples // 4]
-        ], dim = 0)
-        dataset[dataset == 1]  = 0 #(
-        dataset[dataset == -1] = 1 #)
-        dataset = dataset[t.randperm(dataset.shape[0]),:] #shuffle the dataset.
-
-        #add BOS token to beginning and pad to end
-        self.tokens = np.concatenate([
-            PAREN_REVERSE_VOCAB['BOS']*np.ones((dataset.shape[0], 1)), #BOS
-            dataset, 
-            PAREN_REVERSE_VOCAB[' PAD']*np.ones((dataset.shape[0], 1)) #pad
-        ], axis=1).astype(int)
