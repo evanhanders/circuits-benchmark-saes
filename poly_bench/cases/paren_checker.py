@@ -40,34 +40,18 @@ def create_paren_checker_tokenizer() -> PreTrainedTokenizerFast:
     print(f"Decoded: {decoded}")
     return hf_tokenizer
 
-class LeftParenCountHead(t.nn.Module):
-    """ Calculates how many left parens are in the series up to this token """
+class TokenCountHead(t.nn.Module):
+    """ Counts the number of tokens in the series up to this token """
+    def __init__(self, token_to_count: int):
+        super().__init__()
+        self.token_to_count = token_to_count
 
     def forward(self, tokens: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch seq"]:
-        #tok_clone is 1 for ( and -1 for )
         tok_clone = tokens.clone()
-        tok_clone[tok_clone == 0] = 300 #(
-        tok_clone[tok_clone != 300] = 0 #), pad, bos
-        tok_clone[tok_clone == 300] = 1 #(
-
-        #we'll count left to right.
-        lefts = t.cumsum(tok_clone, dim=1).to(int)
-
-        return lefts
-
-class RightParenCountHead(t.nn.Module):
-    """ Calculates how many right parens are in the series up to this token """
-
-    def forward(self, tokens: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch seq"]:
-        #tok_clone is 1 for ( and -1 for )
-        tok_clone = tokens.clone()
-        tok_clone[tok_clone == 1] = 1 #)
-        tok_clone[tok_clone != 1] = 0 #(, pad, bos
-
-        #we'll count left to right.
-        rights = t.cumsum(tok_clone, dim=1).to(int)
-
-        return rights
+        tok_clone[tok_clone == self.token_to_count] = -1
+        tok_clone[tok_clone != -1] = 0
+        tok_clone[tok_clone == -1] = 1
+        return t.cumsum(tok_clone, dim=1).to(int)
 
 class ElevationCalculator(t.nn.Module):
     """ Calculates the elevation at each position in the context"""
@@ -102,7 +86,6 @@ class HorizonLookbackHead(t.nn.Module): #have this be a head that finds the mini
     ) -> Bool[t.Tensor, "batch seq"]:
         #this basically just gives True if horizon has never been violated before or now; false if horizon has been violated
         return t.cumprod(horizon_check, dim=1).bool()
-    
 
 class HighLevelParensBalanceChecker(HookedRootModule):
 
@@ -111,10 +94,9 @@ class HighLevelParensBalanceChecker(HookedRootModule):
         self.d_vocab = d_vocab
         
         self.input_hook = HookPoint()
-        self.left_parens = LeftParenCountHead()
-        self.left_parens_hook = HookPoint()
-        self.right_parens = RightParenCountHead()
-        self.right_parens_hook = HookPoint()
+        self.left_parens = TokenCountHead(PAREN_REVERSE_VOCAB['('])
+        self.right_parens = TokenCountHead(PAREN_REVERSE_VOCAB[')'])
+        self.paren_counts_hook = HookPoint()
 
         self.elevation_calc = ElevationCalculator()
         self.elevation_hook = HookPoint()
@@ -150,8 +132,7 @@ class HighLevelParensBalanceChecker(HookedRootModule):
     def get_correspondence(self) -> Correspondence:
         corr = {
             'input_hook' :           [('hook_embed', Ix[[None]],                None)],
-            'left_parens_hook' :     [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
-            'right_parens_hook' :    [('blocks.0.attn.hook_z',    Ix[[None, None, 1, None]], None)],
+            'paren_counts_hook' :   [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
             'mlp0_hook':             [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
             'mlp1_hook' :            [('blocks.1.mlp.hook_post',  Ix[[None]], None)],
             'horizon_lookback_hook': [('blocks.2.attn.hook_z',    Ix[[None, None, 3, None]], None)],
@@ -173,6 +154,9 @@ class HighLevelParensBalanceChecker(HookedRootModule):
 
         left_parens = self.left_parens_hook(self.left_parens(tokens))
         right_parens = self.right_parens_hook(self.right_parens(tokens))
+        parens_counts = self.paren_counts_hook(t.stack((left_parens, right_parens)))
+        left_parens = parens_counts[0]
+        right_parens = parens_counts[1]
 
         elevation = self.elevation_hook(self.elevation_calc(left_parens, right_parens))
         elevation = self.mlp0_hook(elevation)
@@ -259,6 +243,7 @@ def test_HL_parens_balancer_components():
     tokens = t.Tensor(tokens).to(int)
     true_lefts = t.Tensor(true_lefts).to(int)
     true_rights = t.Tensor(true_rights).to(int)
+    true_parens_counts = t.stack((true_lefts, true_rights))
     true_mlp0_check = t.Tensor(true_mlp0_check).to(int)
     true_mlp1_check = t.Tensor(true_mlp1_check).to(bool)
     true_hor_lookback = t.Tensor(true_hor_lookback).to(bool)
@@ -268,8 +253,9 @@ def test_HL_parens_balancer_components():
     checker = HighLevelParensBalanceChecker()
     _, cache   = checker.run_with_cache((tokens, None, None))
     # print(cache['right_parens_hook'] - true_rights)
-    assert t.allclose(cache['left_parens_hook'], true_lefts)
-    assert t.allclose(cache['right_parens_hook'], true_rights)
+    assert t.allclose(cache['paren_counts_hook'], true_parens_counts)
+    # assert t.allclose(cache['left_parens_hook'], true_lefts)
+    # assert t.allclose(cache['right_parens_hook'], true_rights)
     assert t.allclose(cache['mlp0_hook'], true_mlp0_check)
     assert t.allclose(cache['mlp1_hook'], true_mlp1_check)
     assert t.allclose(cache['horizon_lookback_hook'], true_hor_lookback)

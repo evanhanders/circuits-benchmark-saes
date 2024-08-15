@@ -42,9 +42,9 @@ def create_tokenizer(vocab: dict) -> PreTrainedTokenizerFast:
     
     # Add the special tokens to the Hugging Face tokenizer
     hf_tokenizer.add_special_tokens({
-        'unk_token': ' UNK',
+        'unk_token': 'UNK',
         'bos_token': 'BOS',
-        'pad_token': ' PAD',
+        'pad_token': 'PAD',
     })
     return hf_tokenizer
 
