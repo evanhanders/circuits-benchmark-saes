@@ -7,6 +7,7 @@ import torch
 import numpy as np
 from torch import nn, Tensor
 from transformer_lens.hook_points import HookedRootModule, HookPoint
+from transformer_lens import HookedTransformerConfig
 from iit.utils.index import TorchIndex, Ix
 from iit.utils.correspondence import Correspondence
 from iit.utils.nodes import HLNode
@@ -15,113 +16,130 @@ from circuits_benchmark.utils.iit.iit_hl_model import IITHLModel
 from circuits_benchmark.benchmark.tracr_benchmark_case import TracrBenchmarkCase
 from circuits_benchmark.benchmark.vocabs import TRACR_PAD
 
+from cases.poly_case import PolyCase
+
+#TODO: Add abstraction for dataset.
+
 
 class PolyHLModel(HookedRootModule):
 
     def __init__(
             self, 
-            hl_models: list[IITHLModel], 
-            corrs: list[Correspondence], 
-            cases = list[TracrBenchmarkCase],
-            attn_suffix: str = 'attn.hook_z' #force all attn hooks to have the same suffix
+            hl_classes: list[PolyCase], 
+            attn_suffix: str = 'attn.hook_z', #force all attn hooks to have the same suffix
+            mlp_suffix: str = 'mlp.hook_post' #force all mlp hooks to have the same suffix
             ):
         super().__init__()
-        self.hl_models = hl_models
-        self.corrs = corrs
-        self.cases = cases
+        self.attn_suffix = attn_suffix
+        self.mlp_suffix = mlp_suffix
+        self.hl_classes = hl_classes
+        self.hl_models = [hl_class() for hl_class in hl_classes]
+        self.corrs = [model.get_correspondence() for model in self.hl_models]
+        self.cfgs = [model.get_ll_model_cfg() for model in self.hl_models]
 
-        self.tracr_d_heads = [mod.W_Q.shape[-1] for mod in self.hl_models]
-        self.tracr_d_mlps = [mod.W_in[0].shape[1] for mod in self.hl_models]
-        self.tracr_d_models = [mod.cfg.d_model for mod in self.hl_models]
-        self.tracr_n_ctx = [mod.cfg.n_ctx for mod in self.hl_models]
+        # # TODO: For circuits-benchmark integration
+        # self.tracr_d_heads = [mod.W_Q.shape[-1] for mod in self.hl_models]
+        # self.tracr_d_mlps = [mod.W_in[0].shape[1] for mod in self.hl_models]
+        # self.tracr_d_models = [mod.cfg.d_model for mod in self.hl_models]
+        # self.tracr_n_ctx = [mod.cfg.n_ctx for mod in self.hl_models]
 
-        self.n_layers = max([mod.cfg.n_layers for mod in self.hl_models])
-        self.n_heads = max([mod.cfg.n_heads for mod in self.hl_models])
-        self.n_ctx = max(self.tracr_n_ctx) + 1
-        self.d_head = max(self.tracr_d_heads)
-        self.d_mlp = max(self.tracr_d_mlps)
-        self.attn_shapes = []
+        self.d_model_list = [cfg.d_model for cfg in self.cfgs]
+        self.n_layers_list = [cfg.n_layers for cfg in self.cfgs]
+        self.n_heads_list = [cfg.n_heads for cfg in self.cfgs]
+        self.n_ctx_list = [cfg.n_ctx for cfg in self.cfgs]
+        self.d_head_list = [cfg.d_head for cfg in self.cfgs]
+        self.d_mlp_list = [cfg.d_mlp for cfg in self.cfgs]
+        self.d_vocab_list = [cfg.d_vocab for cfg in self.cfgs]
 
-        #make hooks for each necessary attn head and each mlp
+        self.cfg = HookedTransformerConfig(
+            n_layers = max(self.n_layers_list),
+            d_model = max(self.d_model_list),
+            n_ctx = max(self.n_ctx_list),
+            d_head = max(self.d_head_list),
+            d_vocab = max(self.d_vocab_list),
+            act_fn = "relu"
+        )
+
+        # We need to store the shapes of the attn results because hook_result and hook_z have different shapes.
+        self.attn_shapes = [] 
+        corr_dict = defaultdict(list)
+        for model_number, corr in enumerate(self.corrs):
+            if corr.suffixes['attn'] == 'attn.hook_result':
+                self.attn_shapes.append(self.d_model_list[model_number])
+            else:
+                self.attn_shapes.append(self.d_head_list[model_number])
+            
+        self.attn_shape = max(self.attn_shapes)
+
+        #make hooks for each attn head and each mlp; we'll only use a subset of them.
         self.input_hook = HookPoint()
         self.task_hook = HookPoint()
-        self.attn_hooks = nn.ModuleList([nn.ModuleList([HookPoint() for _ in range(self.n_heads)]) for _ in range(self.n_layers)])
-        self.mlp_hooks = nn.ModuleList([HookPoint() for _ in range(self.n_layers)])
+        self.attn_hooks = nn.ModuleList([nn.ModuleList([HookPoint() for _ in range(self.cfg.n_heads)]) for _ in range(self.cfg.n_layers)])
+        self.mlp_hooks = nn.ModuleList([HookPoint() for _ in range(self.cfg.n_layers)])
 
-        corr_dict = defaultdict(list)
-
-        for model_number, corr in enumerate(corrs):
-            if corr.suffixes['attn'] == 'attn.hook_result':
-                self.attn_shapes.append(self.tracr_d_models[model_number])
-            else:
-                self.attn_shapes.append(self.tracr_d_heads[model_number])
-            corr_keys = defaultdict(list)
-            for k in corr.keys():
-                corr_keys[k.name].append(k)
-            for i in range(self.n_layers):
-                for k, suff in corr.suffixes.items():
-
-                    name = f'blocks.{i}.{suff}'
-                    if k == 'attn':
-                        if model_number == 0:
-                            for _ in range(self.n_heads):
-                                corr_dict[name].append([])
-                        if name in corr_keys.keys():
-                            hl_nodes = corr_keys[name]
-                            for hl_node in hl_nodes:
-                                ll_nodes = corr[hl_node]
-                                for head in range(self.n_heads):
-                                    used = False
-                                    for node in ll_nodes:
-                                        if node.index.as_index[2] == head:
-                                            corr_dict[name][head].append(corr_keys[name])
-                                            used = True
-                                            break
-                                    if not used:
-                                        corr_dict[name][head].append(None)
-                        else:
-                            for head in range(self.n_heads):
-                                corr_dict[name][head].append(None)
-                    elif k == 'mlp':
-                        if name in corr_keys.keys():
-                            corr_dict[name].append(corr_keys[name])
-                        else:
-                            corr_dict[name].append(None)
-                    else:
-                        raise ValueError(f"Unknown suffix in correspondence: {k}")
-        self.attn_shape = max(self.attn_shapes)
-        self.corr_prep_dict = corr_dict
+        # Loop through each layer, (head and mlp) in the combined model.
+        # Add a list of hooks that go to that head/mpl in the LL models.
+        self.corr_mapping = defaultdict(list)
 
         corr_dict = {}
         task_id_set = False
         corr_dict['input_hook'] = [('blocks.0.hook_resid_pre', Ix[[None]], None),]
-        for i in range(self.n_layers):
-            for j in range(self.n_heads):
-                use_attn_head = False
-                use_mlp = False
-                for k in range(len(self.hl_models)):
-                    corr = self.corrs[k]
-                    suffixes = corr.suffixes
-                    attn_hook_name = f'blocks.{i}.{suffixes["attn"]}'
-                    new_attn_hook_name = f'blocks.{i}.{attn_suffix}'
-                    mlp_hook_name = f'blocks.{i}.{suffixes["mlp"]}'
-                    if self.corr_prep_dict[attn_hook_name][j][k] is not None:
-                        use_attn_head = True
-                    if self.corr_prep_dict[mlp_hook_name][k] is not None:
-                        use_mlp = True
-                if use_attn_head:
-                    corr_dict[f'attn_hooks.{i}.{j}'] = [(new_attn_hook_name, Ix[[None,None,j,None]], None),]
-                elif not task_id_set:
-                    corr_dict[f'task_hook'] = [(new_attn_hook_name, Ix[[None,None,j,None]], None),]
-                    task_id_set = True
-                if use_mlp and j == 0:
-                    corr_dict[f'mlp_hooks.{i}'] = [(mlp_hook_name, Ix[[None]], None),]
-        self.corr = Correspondence.make_corr_from_dict(corr_dict, suffixes={'attn': attn_suffix, 'mlp': suffixes['mlp']})
+        for layer in range(self.cfg.n_layers):
+            # create MLP hooks
+            mlp_hook_name = f'blocks.{layer}.{self.mlp_suffix}'
+            for i, corr in enumerate(self.corrs):
+                not_yet_used = True
+                for k, v in corr.items():
+                    for node in v:
+                        if node.name == f"blocks.{layer}.{corr.suffixes['mlp']}":
+                            if not_yet_used:
+                                self.corr_mapping[mlp_hook_name].append([k])
+                                not_yet_used = False
+                            else:
+                                self.corr_mapping[mlp_hook_name][i].append([k])
+                if not_yet_used:
+                    self.corr_mapping[mlp_hook_name].append(None)
+                else:
+                    corr_dict[f'mlp_hooks.{layer}'] = [(mlp_hook_name, Ix[[None]], None),]
+            
+            # create Attn hooks
+            attn_hook_name = f'blocks.{layer}.{self.attn_suffix}'
+            for i, corr in enumerate(self.corrs):
+                for head in range(self.cfg.n_heads):
+                    corr_key = f'{attn_hook_name}.{head}'
+                    if i == 0:
+                        self.corr_mapping[corr_key] = []
+                    not_yet_used = True
+                    for k, v in corr.items():
+                        for node in v:
+                            if node.name == f"blocks.{layer}.{corr.suffixes['attn']}" and node.index.as_index[2] == head:
+                                if not_yet_used:
+                                    self.corr_mapping[corr_key].append([k])
+                                    not_yet_used = False
+                                else:
+                                    self.corr_mapping[corr_key][i].append([k])
+                    if not_yet_used:
+                        self.corr_mapping[corr_key].append(None)
+                        if not task_id_set:
+                            corr_dict[f'task_hook'] = [(attn_hook_name, Ix[[None,None,head,None]], None),]
+                            task_id_set = True
+                    else:
+                        corr_dict[f'attn_hooks.{layer}.{head}'] = [(attn_hook_name, Ix[[None,None,head,None]], None),]
+            
+                    
+        # for k, v in self.corr_mapping.items():
+        #     print(k, v)
+        # print()
+        # for k, v in corr_dict.items():
+        #     print(k, v)
 
+        #TODO: get slices from max context for each model
+            
+        self.corr = Correspondence.make_corr_from_dict(corr_dict, suffixes={'attn': self.attn_suffix, 'mlp': self.mlp_suffix})
         self.setup()
     
-    def is_categorical(self):
-        return False
+    def is_categorical(self) -> bool:
+        return True
     
     def forward(self, x):
         # get sorting indices by task id
@@ -134,6 +152,7 @@ class PolyHLModel(HookedRootModule):
         # Step 1 -- get all the activations.
         caches = []
         for i, hl_model in enumerate(self.hl_models):
+            # tracr version
             if isinstance(hl_model, IITHLModel):
                 hl_model = hl_model.hl_model
             #clip token vocab down to task vocab size; replace out-of-task tokens with PAD.

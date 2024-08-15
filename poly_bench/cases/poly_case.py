@@ -17,7 +17,6 @@ from .utils import CustomDataset
 
 class PolyCase(HookedRootModule, ABC):
     def __init__(self, vocab_dict: dict[str, int], device: str = get_device()):
-        print('here')
         super().__init__()
         self.vocab_dict = vocab_dict
         self.d_vocab = len(vocab_dict.keys()) - 1 #-1 because we don't do computations for UNK token
