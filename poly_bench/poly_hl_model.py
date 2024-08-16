@@ -11,15 +11,82 @@ from transformer_lens import HookedTransformerConfig
 from iit.utils.index import TorchIndex, Ix
 from iit.utils.correspondence import Correspondence
 from iit.utils.nodes import HLNode
+from iit.utils.iit_dataset import train_test_split, IITDataset
 
 from circuits_benchmark.utils.iit.iit_hl_model import IITHLModel
 from circuits_benchmark.benchmark.tracr_benchmark_case import TracrBenchmarkCase
 from circuits_benchmark.benchmark.vocabs import TRACR_PAD
 
-from cases.poly_case import PolyCase
+from cases.poly_case import PolyCase, PolyBenchDataset
+from cases.utils import CustomDataset
 
-#TODO: Add abstraction for dataset.
 
+class PolyModelDataset:
+
+    def __init__(self, datasets: list[PolyBenchDataset], n_ctx: int, train_frac=0.8, seed=42):
+        N_samples = None
+        for dataset in datasets:
+            if dataset.n_ctx >= n_ctx:
+                raise ValueError("All datasets must have n_ctx less than the combined model's n_ctx.")
+            if N_samples is None:
+                N_samples = dataset.N_samples
+            elif N_samples != dataset.N_samples:
+                raise ValueError("All datasets must have the same number of samples.")
+            
+        self.datasets = datasets
+        self.n_ctx = n_ctx
+
+        # reset the dataset.tokens attribute by adding a task_id token to the beginning of the sequence and padding to the end.
+        max_d_vocab = 0
+        for i, dataset in enumerate(datasets):
+            padding = [dataset.map_dict['PAD']]*(n_ctx - dataset.n_ctx - 1) 
+            dataset.tokens = torch.tensor([ [i] + seq.tolist() + padding for seq in dataset.tokens])
+            dataset.map_tokens_to_str()
+            dataset.generate_labels(skip_first=True)
+            if dataset.labels.shape[-1] > max_d_vocab:
+                max_d_vocab = dataset.labels.shape[-1]
+        
+        # ensure that all labels have the same d_vocab
+        for i, dataset in enumerate(datasets):
+            #ensure that last dim of dataset.labels has length max_d_vocab; if not, expand with zeros.
+            if dataset.labels.shape[-1] < max_d_vocab:
+                padding = torch.zeros((dataset.labels.shape[0], dataset.labels.shape[1], max_d_vocab - dataset.labels.shape[-1]))
+                dataset.labels = torch.cat([torch.tensor(dataset.labels), padding], dim=-1)
+            dataset.build_dataset()
+        
+
+        
+        print([dataset.labels.shape for dataset in datasets])
+
+        #combine all datasets into one.
+        tokens = torch.cat([torch.tensor(dataset.tokens) for dataset in datasets], dim=0)
+        labels = torch.cat([torch.tensor(dataset.labels) for dataset in datasets], dim=0)
+        markers = torch.cat([torch.tensor(dataset.markers) for dataset in datasets], dim=0)
+
+        #shuffle the dataset
+        idx = torch.randperm(tokens.shape[0])
+        tokens = tokens[idx]
+        labels = labels[idx]
+        markers = markers[idx]
+
+        #Build IIT datasets
+        self.dataset = CustomDataset(
+            inputs = tokens,
+            targets = np.array(labels),
+            markers = np.array(markers)
+        )
+        train_dataset, test_dataset = train_test_split(
+            self.dataset, test_size=1-train_frac, random_state=42
+        )
+        self.train_set = IITDataset(train_dataset, train_dataset, seed=seed)
+        self.test_set = IITDataset(test_dataset, test_dataset, seed=seed)
+    
+    def get_IIT_train_test_set(self):
+        return self.train_set, self.test_set
+
+    def get_dataset(self):
+        return self.dataset        
+        
 
 class PolyHLModel(HookedRootModule):
 
@@ -54,7 +121,7 @@ class PolyHLModel(HookedRootModule):
         self.cfg = HookedTransformerConfig(
             n_layers = max(self.n_layers_list),
             d_model = max(self.d_model_list),
-            n_ctx = max(self.n_ctx_list),
+            n_ctx = max(self.n_ctx_list) + 1,
             d_head = max(self.d_head_list),
             d_vocab = max(self.d_vocab_list),
             act_fn = "relu"
