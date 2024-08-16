@@ -63,10 +63,11 @@ class PolyBenchDataset(ABC):
         #generate lists of self.str_tokens and self.tokens:
         self.generate_tokens()
         self.map_tokens_to_str()
-
-        #generate labels
         self.generate_labels()
+        self.build_dataset()
+    
 
+    def build_dataset(self) -> None:
         self.dataset = Dataset.from_dict({
                 'tokens' : self.tokens,
                 'str_tokens' : self.str_tokens,
@@ -84,7 +85,7 @@ class PolyBenchDataset(ABC):
         self.str_tokens = vectorized_map(self.tokens)
 
     @abstractmethod
-    def generate_labels(self):
+    def generate_labels(self, skip_first: bool = False) -> None:
         pass
 
     def get_dataset(self):

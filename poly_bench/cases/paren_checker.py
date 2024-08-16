@@ -116,7 +116,7 @@ class HighLevelParensBalanceChecker(PolyCase):
         return HookedTransformerConfig(
             n_layers = 3,
             d_model = 20,
-            n_ctx = 21,
+            n_ctx = 15,
             d_head = 5,
             d_vocab = self.d_vocab,
             act_fn = "relu"
@@ -130,7 +130,7 @@ class HighLevelParensBalanceChecker(PolyCase):
     def get_correspondence(self) -> Correspondence:
         corr = {
             'input_hook' :           [('hook_embed', Ix[[None]],                None)],
-            'paren_counts_hook' :   [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
+            'paren_counts_hook' :    [('blocks.0.attn.hook_z',    Ix[[None, None, 3, None]], None)],
             'mlp0_hook':             [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
             'mlp1_hook' :            [('blocks.1.mlp.hook_post',  Ix[[None]], None)],
             'horizon_lookback_hook': [('blocks.2.attn.hook_z',    Ix[[None, None, 3, None]], None)],
@@ -141,7 +141,7 @@ class HighLevelParensBalanceChecker(PolyCase):
             hn = HLNode(hk, -1)
             lns = {LLNode(name=k, index=idx, subspace=sp) for k, idx, sp in lks}
             corr_node_dict[hn] = lns
-        return Correspondence(corr_node_dict)
+        return Correspondence(corr_node_dict, suffixes={'mlp': 'mlp.hook_post', 'attn': 'attn.hook_z'})
          
     def is_categorical(self) -> bool:
         return True
@@ -289,10 +289,13 @@ class BalancedParensDataset(PolyBenchDataset):
             dataset,
         ], axis=1).astype(int)
     
-    def generate_labels(self):
+    def generate_labels(self, skip_first: bool = False) -> None:
         new_markers = np.zeros(self.tokens.shape, dtype=int)
         for i,sample in enumerate(self.tokens):
-            sample = sample[1:]
+            if skip_first:
+                sample = sample[2:]
+            else:
+                sample = sample[1:]
             new_markers[i,1:][self.passes_balance_test(sample)] = 1
             new_markers[i,1:][np.logical_and(~self.passes_balance(sample), self.passes_horizon(sample))] = 2
             new_markers[i,1:][np.logical_and(~self.passes_horizon(sample), self.passes_balance(sample))] = 3

@@ -105,7 +105,7 @@ class HighLevelDuplicateRemover(PolyCase):
             hn = HLNode(hk, -1)
             lns = {LLNode(name=k, index=idx, subspace=sp) for k, idx, sp in lks}
             corr_node_dict[hn] = lns
-        return Correspondence(corr_node_dict)
+        return Correspondence(corr_node_dict, suffixes={'mlp': 'mlp.hook_post', 'attn': 'attn.hook_z'})
 
     def forward(self, inputs: tuple[Int[t.Tensor, "batch seq"], t.Tensor, t.Tensor]) -> Float[t.Tensor, "batch seq logits"]:
         tokens, _, _ = inputs
@@ -152,12 +152,18 @@ class DuplicateRemoverDataset(PolyBenchDataset):
             dataset, 
         ], axis=1).astype(int)
 
-    def generate_labels(self):
+    def generate_labels(self, skip_first: bool = False) -> None:
         hl_model = HighLevelDuplicateRemover()
         new_markers = np.zeros(self.tokens.shape, dtype=int)
         for i,sample in enumerate(self.tokens):
+            if skip_first:
+                sample = sample[1:]
             _, cache = hl_model.run_with_cache((t.tensor(sample).unsqueeze(0), None, None))
-            new_markers[i] = cache['output_hook']
+            if skip_first:
+                new_markers[i][1:] = cache['output_hook']
+                new_markers[i][0] = self.map_dict['PAD']
+            else:
+                new_markers[i] = cache['output_hook']
         self.markers = new_markers
         self.labels = np.copy(self.markers)
         self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys()) - 1).float().numpy() #-1 to remove UNK.

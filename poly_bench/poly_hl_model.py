@@ -1,13 +1,14 @@
 from collections import defaultdict
 from functools import partial
 from typing import Optional, Callable
+from jaxtyping import Int, Float
 
 
 import torch
 import numpy as np
 from torch import nn, Tensor
 from transformer_lens.hook_points import HookedRootModule, HookPoint
-from transformer_lens import HookedTransformerConfig
+from transformer_lens import HookedTransformerConfig, HookedTransformer
 from iit.utils.index import TorchIndex, Ix
 from iit.utils.correspondence import Correspondence
 from iit.utils.nodes import HLNode
@@ -53,10 +54,7 @@ class PolyModelDataset:
                 padding = torch.zeros((dataset.labels.shape[0], dataset.labels.shape[1], max_d_vocab - dataset.labels.shape[-1]))
                 dataset.labels = torch.cat([torch.tensor(dataset.labels), padding], dim=-1)
             dataset.build_dataset()
-        
 
-        
-        print([dataset.labels.shape for dataset in datasets])
 
         #combine all datasets into one.
         tokens = torch.cat([torch.tensor(dataset.tokens) for dataset in datasets], dim=0)
@@ -94,7 +92,8 @@ class PolyHLModel(HookedRootModule):
             self, 
             hl_classes: list[PolyCase], 
             attn_suffix: str = 'attn.hook_z', #force all attn hooks to have the same suffix
-            mlp_suffix: str = 'mlp.hook_post' #force all mlp hooks to have the same suffix
+            mlp_suffix: str = 'mlp.hook_post', #force all mlp hooks to have the same suffix'
+            size_expansion: int = 1,
             ):
         super().__init__()
         self.attn_suffix = attn_suffix
@@ -103,6 +102,8 @@ class PolyHLModel(HookedRootModule):
         self.hl_models = [hl_class() for hl_class in hl_classes]
         self.corrs = [model.get_correspondence() for model in self.hl_models]
         self.cfgs = [model.get_ll_model_cfg() for model in self.hl_models]
+
+        self.found_space = False
 
         # # TODO: For circuits-benchmark integration
         # self.tracr_d_heads = [mod.W_Q.shape[-1] for mod in self.hl_models]
@@ -120,9 +121,9 @@ class PolyHLModel(HookedRootModule):
 
         self.cfg = HookedTransformerConfig(
             n_layers = max(self.n_layers_list),
-            d_model = max(self.d_model_list),
+            d_model = size_expansion*max(self.d_model_list),
             n_ctx = max(self.n_ctx_list) + 1,
-            d_head = max(self.d_head_list),
+            d_head = size_expansion*max(self.d_head_list),
             d_vocab = max(self.d_vocab_list),
             act_fn = "relu"
         )
@@ -171,11 +172,10 @@ class PolyHLModel(HookedRootModule):
             
             # create Attn hooks
             attn_hook_name = f'blocks.{layer}.{self.attn_suffix}'
-            for i, corr in enumerate(self.corrs):
-                for head in range(self.cfg.n_heads):
-                    corr_key = f'{attn_hook_name}.{head}'
-                    if i == 0:
-                        self.corr_mapping[corr_key] = []
+            for head in range(self.cfg.n_heads):
+                corr_key = f'{attn_hook_name}.{head}'
+                self.corr_mapping[corr_key] = []
+                for i, corr in enumerate(self.corrs):
                     not_yet_used = True
                     for k, v in corr.items():
                         for node in v:
@@ -187,46 +187,51 @@ class PolyHLModel(HookedRootModule):
                                     self.corr_mapping[corr_key][i].append([k])
                     if not_yet_used:
                         self.corr_mapping[corr_key].append(None)
-                        if not task_id_set:
-                            corr_dict[f'task_hook'] = [(attn_hook_name, Ix[[None,None,head,None]], None),]
-                            task_id_set = True
                     else:
                         corr_dict[f'attn_hooks.{layer}.{head}'] = [(attn_hook_name, Ix[[None,None,head,None]], None),]
-            
-                    
-        # for k, v in self.corr_mapping.items():
-        #     print(k, v)
-        # print()
-        # for k, v in corr_dict.items():
-        #     print(k, v)
-
-        #TODO: get slices from max context for each model
+                
+                if not task_id_set and all([val is None for val in self.corr_mapping[corr_key]]):
+                    corr_dict[f'task_hook'] = [(attn_hook_name, Ix[[None,None,head,None]], None),]
+                    task_id_set = True     
             
         self.corr = Correspondence.make_corr_from_dict(corr_dict, suffixes={'attn': self.attn_suffix, 'mlp': self.mlp_suffix})
         self.setup()
     
     def is_categorical(self) -> bool:
         return True
+
+    def get_ll_model(self) -> HookedTransformer:
+        return HookedTransformer(self.cfg)
+
+    def get_correspondence(self) -> Correspondence:
+        return self.corr
     
-    def forward(self, x):
-        # get sorting indices by task id
-        if isinstance(x, tuple):
-            x = x[0]
-        tokens = self.input_hook(x)
+    def forward(self, inputs: tuple[Int[torch.Tensor, "batch seq"], torch.Any, torch.Any]) -> Float[torch.Tensor, "batch seq logits"]:
+        tokens, _, _ = inputs
+        tokens = self.input_hook(tokens)
         task_ids = tokens[:, 0]
         task_ids = self.task_hook(task_ids)
+
+
 
         # Step 1 -- get all the activations.
         caches = []
         for i, hl_model in enumerate(self.hl_models):
-            # tracr version
-            if isinstance(hl_model, IITHLModel):
-                hl_model = hl_model.hl_model
+            # # tracr version
+            # if isinstance(hl_model, IITHLModel):
+            #     hl_model = hl_model.hl_model
+
             #clip token vocab down to task vocab size; replace out-of-task tokens with PAD.
-            encoder = hl_model.tracr_input_encoder
-            task_tokens = torch.clone(tokens)[:, 1:hl_model.cfg.n_ctx+1]
-            task_tokens[task_tokens >= hl_model.cfg.d_vocab] = encoder.encoding_map[TRACR_PAD]
-            _, cache = hl_model.run_with_cache(task_tokens)
+            # encoder = hl_model.tracr_input_encoder
+            # pad_id = encoder.encoding_map[TRACR_PAD]
+            # d_vocab = hl_model.cfg.d_vocab
+            # n_ctx = hl_model.cfg.n_ctx
+            pad_id = hl_model.vocab_dict['PAD']
+            d_vocab = self.d_vocab_list[i]
+            n_ctx = self.n_ctx_list[i]
+            task_tokens = torch.clone(tokens)[:, 1:n_ctx+1]
+            task_tokens[task_tokens >= d_vocab] = pad_id
+            _, cache = hl_model.run_with_cache((task_tokens, None, None))
             caches.append(cache)
         
         # for k, i in caches[0].items():
@@ -236,222 +241,227 @@ class PolyHLModel(HookedRootModule):
         caches = [{k: i for k, i in cache.items()} for cache in caches]
 
 
-        # Step 2 -- construct all the hooks for THIS model.
-        for layer in range(self.n_layers):
-            # create MLP hooks
-            mlp_storage = torch.zeros((len(self.hl_models), tokens.shape[0], tokens.shape[1], self.d_mlp))
-            attn_storage = torch.zeros((len(self.hl_models), tokens.shape[0], tokens.shape[1], self.n_heads, self.attn_shape))
-            for i, hl_model in enumerate(self.hl_models):
 
-                #MLP
-                suffix = self.corrs[i].suffixes['mlp']
-                hook_name = f'blocks.{layer}.{suffix}'
-                #unpack from cache
-                if self.corr_prep_dict[hook_name][i] is not None:
-                    # print(hook_name, mlp_storage.shape, caches[i][hook_name].shape)
-                    mlp_storage[i,:,1:hl_model.cfg.n_ctx+1,:self.tracr_d_mlps[i]] = caches[i][hook_name]
+        # Walk through all of the activations in the caches and figure out how to map them into a single tensor per HL hook.
+        for name, hooks in self.corr_mapping.items():
+            if self.mlp_suffix not in name and self.attn_suffix not in name:
+                continue
+            # print(name, hooks)
+            data = []
+            shapes = []
+            slices = []
+            numel = 0
+            for i in range(len(self.hl_models)):
+                # print(name, hooks[i])
+                if hooks[i] is not None:
+                    for hook in hooks[i]:
+                        # print(hook, caches[i][hook].shape)
+                        shapes.append(caches[i][hook].shape)
+                        data.append(caches[i][hook].flatten())
+                        this_numel = caches[i][hook].numel()
+                        slices.append(slice(numel, numel + this_numel))
+                        numel += this_numel
+            if numel > 0:
+                data = torch.cat(data)
+                if self.mlp_suffix in name:
+                    layer = int(name.split('.')[1])
+                    hook = self.mlp_hooks[layer]
+                elif self.attn_suffix in name:
+                    layer = int(name.split('.')[1])
+                    head = int(name.split('.')[4])
+                    hook = self.attn_hooks[layer][head]
+                data = hook(data)
+                idx = 0
+                for i in range(len(self.hl_models)):
+                    if hooks[i] is not None:
+                        for j, hook in enumerate(hooks[i]):
+                            caches[i][hook] = data[slices[idx]].reshape(shapes[idx])
+                            idx += 1
                 
-
-                #Attn
-                suffix = self.corrs[i].suffixes['attn']
-                hook_name = f'blocks.{layer}.{suffix}'
-                attn_shape = self.attn_shapes[i]
-                #unpack from cache
-                for head in range(self.n_heads):
-                    if self.corr_prep_dict[hook_name][head][i] is not None:
-                        # print(attn_storage[i,:,1:hl_model.cfg.n_ctx+1,head,:attn_shape].shape, caches[i][hook_name][:,:,head].shape)
-                        attn_storage[i,:,1:hl_model.cfg.n_ctx+1,head,:attn_shape] = caches[i][hook_name][:,:,head]
-
-            #modify with hook
-            mlp_storage = self.mlp_hooks[layer](mlp_storage)
-            for head in range(self.n_heads):
-                attn_storage[:,:,:,head] = self.attn_hooks[layer][head](attn_storage[:,:,:,head])
-
-                
-            for i, hl_model in enumerate(self.hl_models):
-                #pack back into cache
-                # MLP
-                suffix = self.corrs[i].suffixes['mlp']
-                hook_name = f'blocks.{layer}.{suffix}'
-                caches[i][hook_name] = mlp_storage[i,:,1:hl_model.cfg.n_ctx+1,:self.tracr_d_mlps[i]]
-                # Attn
-                suffix = self.corrs[i].suffixes['attn']
-                hook_name = f'blocks.{layer}.{suffix}'
-                attn_shape = self.attn_shapes[i]
-                caches[i][hook_name] = attn_storage[i,:,1:hl_model.cfg.n_ctx+1,:hl_model.cfg.n_heads,:attn_shape]
-
+      
 
         # Step 3 -- run with a bunch of hooks on the tracr models using the cache, actually doing interventions, and return intervened output.
-        outputs = torch.zeros((tokens.shape[0], tokens.shape[1], 1))
+        outputs = torch.zeros((tokens.shape[0], tokens.shape[1], self.cfg.d_vocab)).to(self.cfg.device)
         self.mask = torch.ones_like(outputs).to(bool)
         self.mask[:,0] = False
         for i, hl_model in enumerate(self.hl_models):
-            if isinstance(hl_model, IITHLModel):
-                hl_model = hl_model.hl_model
-            #clip token vocab down to task vocab size; replace out-of-task tokens with PAD.
-            encoder = hl_model.tracr_input_encoder
-            task_tokens = torch.clone(tokens)[:, 1:hl_model.cfg.n_ctx+1]
-            task_tokens[task_tokens >= hl_model.cfg.d_vocab] = encoder.encoding_map[TRACR_PAD]
+            # if isinstance(hl_model, IITHLModel):
+            #     hl_model = hl_model.hl_model
+            # #clip token vocab down to task vocab size; replace out-of-task tokens with PAD.
+            # encoder = hl_model.tracr_input_encoder
+            # pad_id = encoder.encoding_map[TRACR_PAD]
+
+            pad_id = hl_model.vocab_dict['PAD']
+            task_tokens = torch.clone(tokens)[:, 1:self.n_ctx_list[i]+1]
+            task_tokens[task_tokens >= self.d_vocab_list[i]] = pad_id
 
             # define hooks.
-            def mlp_replacement_hook(x, hook):
-                x[:] = caches[i][hook.name]
+
+            def simple_replacement_hook(x, hook):
+                x[:] = caches[i][hook.name].to(x.device)
+
+            mlp_replacement_hook = simple_replacement_hook
             
             def attn_replacement_hook(x, hook, index: Optional[TorchIndex] = None):
                 x[index.as_index] = caches[i][hook.name][index.as_index]
 
             hooks = []
             #go through self.corr_dict and link up each hook with corresponding hook(s) in HL tracr models.
-            for layer in range(self.n_layers):
+            for layer in range(self.cfg.n_layers):
 
                 #MLP
-                suffix = self.corrs[i].suffixes['mlp']
-                hook_name = f'blocks.{layer}.{suffix}'
+                hook_name = f'blocks.{layer}.{self.mlp_suffix}'
+                hl_model_hook_name = self.corr_mapping[hook_name][i]
                 #unpack from cache
-                if self.corr_prep_dict[hook_name][i] is not None:
-                    hooks.append((hook_name, mlp_replacement_hook))
+                if hl_model_hook_name is not None:
+                    for node in hl_model_hook_name:
+                        hooks.append((node.name, simple_replacement_hook))
                 
                 # Attn
-                suffix = self.corrs[i].suffixes['attn']
-                hook_name = f'blocks.{layer}.{suffix}'
-                for head in range(hl_model.cfg.n_heads):
-                    if self.corr_prep_dict[hook_name][head][i] is not None:
-                        hooks.append((hook_name, partial(attn_replacement_hook, index=TorchIndex([None,None,head,None]))))
+                hook_name = f'blocks.{layer}.{self.attn_suffix}'
+                for head in range(self.n_heads_list[i]):
+                    hl_model_hook_name = self.corr_mapping[f'{hook_name}.{head}'][i]
+                    if hl_model_hook_name is not None:
+                        for node in hl_model_hook_name:
+                            hooks.append((node.name, simple_replacement_hook))
+                            # hooks.append((node.name, partial(attn_replacement_hook, index=TorchIndex([None,None,head,None])))) # for tracr.
 
             # print(hooks)
-            model_output = hl_model.run_with_hooks(task_tokens, fwd_hooks=hooks)
-            outputs[task_ids == i, 1:hl_model.cfg.n_ctx+1,:] = model_output[task_ids == i]
+            model_output = hl_model.run_with_hooks((task_tokens, None, None), fwd_hooks=hooks)
+            outputs[task_ids == i, 1:self.n_ctx_list[i]+1,:self.d_vocab_list[i]] = model_output[task_ids == i].to(self.cfg.device)
+            outputs[task_ids == i, 0, hl_model.vocab_dict['PAD']] = 1
         
             #TODO: Make & return (or store?) a mask for evaluating the loss on the output.
-            self.mask[task_ids == i, hl_model.cfg.n_ctx+1:] = False
-            self.weighting = max(self.tracr_n_ctx) / self.mask.sum(dim=1, keepdim=True)
+            self.mask[task_ids == i, self.n_ctx_list[i]+1:] = False
 
         return outputs
     
-    def get_IIT_loss_over_batch(
-        self,
-        base_input: tuple[Tensor, Tensor, Tensor],
-        ablation_input: tuple[Tensor, Tensor, Tensor],
-        hl_node: HLNode,
-        loss_fn: Callable[[Tensor, Tensor], Tensor],
-    ) -> Tensor:
-        hl_output, ll_output = self.do_intervention(base_input, ablation_input, hl_node)
-        label_idx = self.get_label_idxs()
-        # IIT loss is only computed on the tokens we care about
-        valid_ll_output = (self.weighting*ll_output)[label_idx.as_index][self.mask]
-        valid_hl_output = (self.weighting*hl_output)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
-        loss = loss_fn(valid_ll_output, valid_hl_output)
-        return loss
-
-    def get_behaviour_loss_over_batch(
-            self, 
-            base_input: tuple[Tensor, Tensor, Tensor], 
-            loss_fn: Callable[[Tensor, Tensor], Tensor]
-            ) -> Tensor:
-        base_x, base_y = base_input[0:2]
-        output = self.ll_model(base_x)
-        # Apply mask.
-        label_idx = self.get_label_idxs()
-        valid_out = (self.weighting*output)[label_idx.as_index][self.mask]
-        valid_base_y = (self.weighting*base_y)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
-        behavior_loss = loss_fn(valid_out, valid_base_y)
-        return behavior_loss
+    #TODO: implement masking for loss computation.
     
-    def get_SIIT_loss_over_batch(
-            self,
-            base_input: tuple[Tensor, Tensor, Tensor],
-            ablation_input: tuple[Tensor, Tensor, Tensor],
-            loss_fn: Callable[[Tensor, Tensor], Tensor]
-    ) -> Tensor:
-        base_x, base_y = base_input[0:2]
-        ablation_x, _ = ablation_input[0:2]
-        ll_node = self.sample_ll_node()
-        _, cache = self.ll_model.run_with_cache(ablation_x)
-        self.ll_cache = cache
-        out = self.ll_model.run_with_hooks(
-            base_x, fwd_hooks=[(ll_node.name, self.make_ll_ablation_hook(ll_node))]
-        )
-        # print(out.shape, base_y.shape)
-        label_idx = self.get_label_idxs()
-        valid_out = (self.weighting*out)[label_idx.as_index][self.mask]
-        valid_base_y = (self.weighting*base_y)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
-        siit_loss = loss_fn(valid_out, valid_base_y) 
-        return siit_loss
+    # def get_IIT_loss_over_batch(
+    #     self,
+    #     base_input: tuple[Tensor, Tensor, Tensor],
+    #     ablation_input: tuple[Tensor, Tensor, Tensor],
+    #     hl_node: HLNode,
+    #     loss_fn: Callable[[Tensor, Tensor], Tensor],
+    # ) -> Tensor:
+    #     hl_output, ll_output = self.do_intervention(base_input, ablation_input, hl_node)
+    #     label_idx = self.get_label_idxs()
+    #     # IIT loss is only computed on the tokens we care about
+    #     valid_ll_output = (self.weighting*ll_output)[label_idx.as_index][self.mask]
+    #     valid_hl_output = (self.weighting*hl_output)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
+    #     loss = loss_fn(valid_ll_output, valid_hl_output)
+    #     return loss
+
+    # def get_behaviour_loss_over_batch(
+    #         self, 
+    #         base_input: tuple[Tensor, Tensor, Tensor], 
+    #         loss_fn: Callable[[Tensor, Tensor], Tensor]
+    #         ) -> Tensor:
+    #     base_x, base_y = base_input[0:2]
+    #     output = self.ll_model(base_x)
+    #     # Apply mask.
+    #     label_idx = self.get_label_idxs()
+    #     valid_out = (self.weighting*output)[label_idx.as_index][self.mask]
+    #     valid_base_y = (self.weighting*base_y)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
+    #     behavior_loss = loss_fn(valid_out, valid_base_y)
+    #     return behavior_loss
+    
+    # def get_SIIT_loss_over_batch(
+    #         self,
+    #         base_input: tuple[Tensor, Tensor, Tensor],
+    #         ablation_input: tuple[Tensor, Tensor, Tensor],
+    #         loss_fn: Callable[[Tensor, Tensor], Tensor]
+    # ) -> Tensor:
+    #     base_x, base_y = base_input[0:2]
+    #     ablation_x, _ = ablation_input[0:2]
+    #     ll_node = self.sample_ll_node()
+    #     _, cache = self.ll_model.run_with_cache(ablation_x)
+    #     self.ll_cache = cache
+    #     out = self.ll_model.run_with_hooks(
+    #         base_x, fwd_hooks=[(ll_node.name, self.make_ll_ablation_hook(ll_node))]
+    #     )
+    #     # print(out.shape, base_y.shape)
+    #     label_idx = self.get_label_idxs()
+    #     valid_out = (self.weighting*out)[label_idx.as_index][self.mask]
+    #     valid_base_y = (self.weighting*base_y)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
+    #     siit_loss = loss_fn(valid_out, valid_base_y) 
+    #     return siit_loss
 
 
-    def run_eval_step(
-            self, 
-            base_input: tuple[Tensor, Tensor, Tensor],
-            ablation_input: tuple[Tensor, Tensor, Tensor],
-            loss_fn: Callable[[Tensor, Tensor], Tensor]
-            ) -> dict:
-        atol = self.training_args["atol"]
+    # def run_eval_step(
+    #         self, 
+    #         base_input: tuple[Tensor, Tensor, Tensor],
+    #         ablation_input: tuple[Tensor, Tensor, Tensor],
+    #         loss_fn: Callable[[Tensor, Tensor], Tensor]
+    #         ) -> dict:
+    #     atol = self.training_args["atol"]
 
-        # compute IIT loss and accuracy
-        label_idx = self.get_label_idxs()
-        hl_node = self.sample_hl_name()
-        hl_output, ll_output = self.do_intervention(base_input, ablation_input, hl_node)
-        hl_output.to(ll_output.device)
-        hl_output = hl_output[label_idx.as_index][self.mask]
-        ll_output = ll_output[label_idx.as_index][self.mask]
-        if self.hl_model.is_categorical():
-            loss = loss_fn(ll_output, hl_output)
-            if ll_output.shape == hl_output.shape:
-                # To handle the case when labels are one-hot
-                hl_output = torch.argmax(hl_output, dim=-1)
-            top1 = torch.argmax(ll_output, dim=-1)
-            accuracy = (top1 == hl_output).float().mean()
-            IIA = accuracy.item()
-        else:
-            loss = loss_fn(ll_output, hl_output)
-            IIA = ((ll_output - hl_output).abs() < atol).float().mean().item()
+    #     # compute IIT loss and accuracy
+    #     label_idx = self.get_label_idxs()
+    #     hl_node = self.sample_hl_name()
+    #     hl_output, ll_output = self.do_intervention(base_input, ablation_input, hl_node)
+    #     hl_output.to(ll_output.device)
+    #     hl_output = hl_output[label_idx.as_index][self.mask]
+    #     ll_output = ll_output[label_idx.as_index][self.mask]
+    #     if self.hl_model.is_categorical():
+    #         loss = loss_fn(ll_output, hl_output)
+    #         if ll_output.shape == hl_output.shape:
+    #             # To handle the case when labels are one-hot
+    #             hl_output = torch.argmax(hl_output, dim=-1)
+    #         top1 = torch.argmax(ll_output, dim=-1)
+    #         accuracy = (top1 == hl_output).float().mean()
+    #         IIA = accuracy.item()
+    #     else:
+    #         loss = loss_fn(ll_output, hl_output)
+    #         IIA = ((ll_output - hl_output).abs() < atol).float().mean().item()
 
-        # compute behavioral accuracy
-        base_x, base_y = base_input[0:2]
-        output = self.ll_model(base_x)
-        output = output[label_idx.as_index][self.mask]
-        base_y = base_y[label_idx.as_index][self.mask]
+    #     # compute behavioral accuracy
+    #     base_x, base_y = base_input[0:2]
+    #     output = self.ll_model(base_x)
+    #     output = output[label_idx.as_index][self.mask]
+    #     base_y = base_y[label_idx.as_index][self.mask]
         
-        #TODO: how to apply weighting here?
-        if self.hl_model.is_categorical():
-            top1 = torch.argmax(output, dim=-1)
-            if output.shape == base_y.shape:
-                # To handle the case when labels are one-hot
-                # TODO: is there a better way?
-                base_y = torch.argmax(base_y, dim=-1)
-            accuracy = (top1 == base_y).float().mean()
-        else:
-            accuracy = ((output - base_y).abs() < atol).float().mean()    
-        base_x, base_y = base_input[0:2]
-        ablation_x, ablation_y = ablation_input[0:2]
+    #     #TODO: how to apply weighting here?
+    #     if self.hl_model.is_categorical():
+    #         top1 = torch.argmax(output, dim=-1)
+    #         if output.shape == base_y.shape:
+    #             # To handle the case when labels are one-hot
+    #             # TODO: is there a better way?
+    #             base_y = torch.argmax(base_y, dim=-1)
+    #         accuracy = (top1 == base_y).float().mean()
+    #     else:
+    #         accuracy = ((output - base_y).abs() < atol).float().mean()    
+    #     base_x, base_y = base_input[0:2]
+    #     ablation_x, ablation_y = ablation_input[0:2]
         
-        _, cache = self.ll_model.run_with_cache(ablation_x)
-        label_idx = self.get_label_idxs()
-        base_y = base_y[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
-        self.ll_cache = cache
-        accuracies = []
-        for node in self.nodes_not_in_circuit:
-            out = self.ll_model.run_with_hooks(
-                base_x, fwd_hooks=[(node.name, self.make_ll_ablation_hook(node))]
-            )
-            ll_output = out[label_idx.as_index][self.mask]
-            if self.hl_model.is_categorical():
-                if ll_output.shape == base_y.shape:
-                    base_y = torch.argmax(base_y, dim=-1)
-                top1 = torch.argmax(ll_output, dim=-1)
-                accuracy = (top1 == base_y).float().mean().item()
-            else:
-                accuracy = ((ll_output - base_y).abs() < self.training_args["atol"]).float().mean().item()
-            accuracies.append(accuracy)
+    #     _, cache = self.ll_model.run_with_cache(ablation_x)
+    #     label_idx = self.get_label_idxs()
+    #     base_y = base_y[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
+    #     self.ll_cache = cache
+    #     accuracies = []
+    #     for node in self.nodes_not_in_circuit:
+    #         out = self.ll_model.run_with_hooks(
+    #             base_x, fwd_hooks=[(node.name, self.make_ll_ablation_hook(node))]
+    #         )
+    #         ll_output = out[label_idx.as_index][self.mask]
+    #         if self.hl_model.is_categorical():
+    #             if ll_output.shape == base_y.shape:
+    #                 base_y = torch.argmax(base_y, dim=-1)
+    #             top1 = torch.argmax(ll_output, dim=-1)
+    #             accuracy = (top1 == base_y).float().mean().item()
+    #         else:
+    #             accuracy = ((ll_output - base_y).abs() < self.training_args["atol"]).float().mean().item()
+    #         accuracies.append(accuracy)
 
-        if len(accuracies) > 0:
-            accuracy = float(np.mean(accuracies))
-        else:
-            accuracy = 1.0
+    #     if len(accuracies) > 0:
+    #         accuracy = float(np.mean(accuracies))
+    #     else:
+    #         accuracy = 1.0
 
-        return {
-            "val/iit_loss": loss.item(),
-            "val/IIA": IIA,
-            "val/accuracy": accuracy.item(),
-            "val/strict_accuracy": accuracy,
-        }
+    #     return {
+    #         "val/iit_loss": loss.item(),
+    #         "val/IIA": IIA,
+    #         "val/accuracy": accuracy.item(),
+    #         "val/strict_accuracy": accuracy,
+    #     }

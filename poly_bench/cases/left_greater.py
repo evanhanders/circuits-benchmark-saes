@@ -98,7 +98,7 @@ class HighLevelLeftGreater(PolyCase):
     def get_correspondence(self) -> Correspondence:
         corr = {
             'input_hook' :           [('hook_embed', Ix[[None]],                None)],
-            'paren_counts_hook' :    [('blocks.0.attn.hook_z',    Ix[[None, None, 0, None]], None)],
+            'paren_counts_hook' :    [('blocks.0.attn.hook_z',    Ix[[None, None, 1, None]], None)],
             'mlp0_hook':             [('blocks.0.mlp.hook_post',  Ix[[None]], None)],
         }
         corr_node_dict = {}
@@ -106,7 +106,7 @@ class HighLevelLeftGreater(PolyCase):
             hn = HLNode(hk, -1)
             lns = {LLNode(name=k, index=idx, subspace=sp) for k, idx, sp in lks}
             corr_node_dict[hn] = lns
-        return Correspondence(corr_node_dict)
+        return Correspondence(corr_node_dict, suffixes={'mlp': 'mlp.hook_post', 'attn': 'attn.hook_z'})
          
     def is_categorical(self) -> bool:
         return True
@@ -125,7 +125,7 @@ class HighLevelLeftGreater(PolyCase):
         
         # output pad at bos spot
         output = (greater_than).to(int)
-        output[:,0] = 2
+        output[:,0] = self.vocab_dict['PAD']
         true_output = t.nn.functional.one_hot(output, num_classes=self.d_vocab).float().to(self.device)
         
         return true_output
@@ -200,15 +200,24 @@ class LeftGreaterDataset(PolyBenchDataset):
             dataset,
         ], axis=1).astype(int)
 
-    def generate_labels(self):
+    def generate_labels(self, skip_first: bool = False) -> None:
         new_markers = np.zeros(self.tokens.shape, dtype=int)
         for i,sample in enumerate(self.tokens):
-            sample = sample[1:]
-            new_markers[i,1:][self.left_greater(sample)] = 1
+            if skip_first:
+                sample = sample[2:]
+            else:
+                sample = sample[1:]
+            mask = self.left_greater(sample)
+            if skip_first:
+                new_markers[i,2:][mask] = 1
+            else:
+                new_markers[i,1:][mask] = 1
         self.markers = new_markers
         self.labels = np.copy(self.markers)
-        self.labels[:,0] = 2 #set pad as answer for bos token.
-        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=4).float().numpy()
+        self.labels[:,0] = self.map_dict['PAD'] #set pad as answer for bos token.
+        if skip_first:
+            self.labels[:,1] = self.map_dict['PAD'] #set pad as answer for bos token.
+        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys())-1).float().numpy()
 
 
 def test_HL_left_greater_components():
