@@ -167,7 +167,6 @@ class DuplicateRemoverDataset(PolyBenchDataset):
         self.markers = new_markers
         self.labels = np.copy(self.markers)
         self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys()) - 1).float().numpy() #-1 to remove UNK.
-        print(self.labels.shape)
 
 def test_HL_duplicate_remover_components():
     # parens balance check
