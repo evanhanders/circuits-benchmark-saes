@@ -16,7 +16,7 @@ from iit.utils.index import Ix
 from iit.utils.iit_dataset import train_test_split
 from iit.utils.iit_dataset import IITDataset
 
-from .utils import CustomDataset, create_tokenizer
+from ..utils import CustomDataset, create_tokenizer
 from .poly_case import PolyCase, PolyBenchDataset
 
 CASE_VOCAB = {
@@ -118,6 +118,9 @@ class HighLevelDuplicateRemover(PolyCase):
         true_output = t.nn.functional.one_hot(output, num_classes=self.d_vocab).float()
         
         return true_output
+
+    def __str__(self):
+        return "duplicate_remover_model"
 
     
 class DuplicateRemoverDataset(PolyBenchDataset):

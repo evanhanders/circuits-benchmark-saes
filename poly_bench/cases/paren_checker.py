@@ -14,7 +14,7 @@ from transformers import PreTrainedTokenizerFast
 from iit.utils.correspondence import Correspondence, HLNode, LLNode
 from iit.utils.index import Ix
 
-from .utils import create_tokenizer
+from ..utils import create_tokenizer
 from .poly_case import PolyCase, PolyBenchDataset
 
 
@@ -168,6 +168,9 @@ class HighLevelParensBalanceChecker(PolyCase):
         true_output = t.nn.functional.one_hot(output, num_classes=self.d_vocab).float().to(self.device)
         
         return true_output
+
+    def __str__(self):
+        return "parens_checker_model"
 
 
 class BalancedParensDataset(PolyBenchDataset):

@@ -12,7 +12,7 @@ from datasets import Dataset
 from iit.utils.iit_dataset import train_test_split, IITDataset
 from iit.utils.correspondence import Correspondence
 
-from .utils import CustomDataset
+from ..utils import CustomDataset
 
 
 class PolyCase(HookedRootModule, ABC):
