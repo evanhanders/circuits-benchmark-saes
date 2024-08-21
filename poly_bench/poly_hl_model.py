@@ -120,7 +120,7 @@ class PolyHLModel(HookedRootModule):
         self.d_vocab_list = [cfg.d_vocab for cfg in self.cfgs]
 
         self.cfg = HookedTransformerConfig(
-            n_layers = max(self.n_layers_list) + 1, #add one for the input layer
+            n_layers = max(self.n_layers_list),
             d_model = size_expansion*max(self.d_model_list),
             n_ctx = max(self.n_ctx_list) + 1,
             d_head = size_expansion*max(self.d_head_list),
@@ -151,19 +151,16 @@ class PolyHLModel(HookedRootModule):
 
         corr_dict = {}
 
-        corr_dict[f'task_hook'] = [(f'blocks.0.{self.attn_suffix}', Ix[[None,None,0,None]], None),]
-        corr_dict['input_hook'] = [('blocks.1.hook_resid_pre', Ix[[None]], None),] #input hook of ll models is after an MLP
+        task_id_set = False
+        corr_dict['input_hook'] = [('blocks.0.hook_resid_pre', Ix[[None]], None),]
         for layer in range(self.cfg.n_layers):
-            if layer == 0:
-                continue
-
             # create MLP hooks
             mlp_hook_name = f'blocks.{layer}.{self.mlp_suffix}'
             for i, corr in enumerate(self.corrs):
                 not_yet_used = True
                 for k, v in corr.items():
                     for node in v:
-                        if node.name == f"blocks.{layer-1}.{corr.suffixes['mlp']}":
+                        if node.name == f"blocks.{layer}.{corr.suffixes['mlp']}":
                             if not_yet_used:
                                 self.corr_mapping[mlp_hook_name].append([k])
                                 not_yet_used = False
@@ -183,7 +180,7 @@ class PolyHLModel(HookedRootModule):
                     not_yet_used = True
                     for k, v in corr.items():
                         for node in v:
-                            if node.name == f"blocks.{layer-1}.{corr.suffixes['attn']}" and node.index.as_index[2] == head:
+                            if node.name == f"blocks.{layer}.{corr.suffixes['attn']}" and node.index.as_index[2] == head:
                                 if not_yet_used:
                                     self.corr_mapping[corr_key].append([k])
                                     not_yet_used = False
@@ -193,6 +190,9 @@ class PolyHLModel(HookedRootModule):
                         self.corr_mapping[corr_key].append(None)
                     else:
                         corr_dict[f'attn_hooks.{layer}.{head}'] = [(attn_hook_name, Ix[[None,None,head,None]], None),]  
+                if not task_id_set and all([val is None for val in self.corr_mapping[corr_key]]):
+                    corr_dict['task_hook'] = [(attn_hook_name, Ix[[None,None,head,None]], None),]
+                    task_id_set = True     
             
         self.corr = Correspondence.make_corr_from_dict(corr_dict, suffixes={'attn': self.attn_suffix, 'mlp': self.mlp_suffix})
         self.setup()
@@ -207,6 +207,19 @@ class PolyHLModel(HookedRootModule):
 
     def get_correspondence(self) -> Correspondence:
         return self.corr
+
+    def sort_output(self, tokens: Tensor, model_outputs: list[Tensor], task_ids: Tensor) -> Tensor:
+        outputs = torch.zeros((tokens.shape[0], tokens.shape[1], self.cfg.d_vocab)).to(self.cfg.device)
+        self.mask = torch.ones_like(outputs).to(bool)
+        self.mask[:,0] = False
+        for i, hl_model in enumerate(self.hl_models):
+            outputs[task_ids == i, 1:self.n_ctx_list[i]+1,:self.d_vocab_list[i]] = model_outputs[i][task_ids == i].to(self.cfg.device)
+            outputs[task_ids == i, 0, 0] = 1
+
+            #TODO: Make & return (or store?) a mask for evaluating the loss on the output.
+            self.mask[task_ids == i, self.n_ctx_list[i]+1:] = False
+        
+        return outputs
     
     def forward(self, inputs: tuple[Int[torch.Tensor, "batch seq"], torch.Any, torch.Any]) -> Float[torch.Tensor, "batch seq logits"]:
         tokens, _, _ = inputs
@@ -214,7 +227,15 @@ class PolyHLModel(HookedRootModule):
         task_ids = tokens[:, 0]
         task_ids = self.task_hook(task_ids)
 
+        task_tokens = []
+        for i, hl_model in enumerate(self.hl_models):
 
+            n_ctx = self.n_ctx_list[i]
+            d_vocab = self.d_vocab_list[i]
+            task_tokens.append(torch.clone(tokens)[:, 1:n_ctx+1])
+            bad_tokens_mask = task_tokens[-1] >= d_vocab
+            #randomly sample from 2 to d_vocab-1 to replace out-of-task tokens.
+            task_tokens[-1][bad_tokens_mask] = torch.randint(2, d_vocab-1, (bad_tokens_mask.sum().item(),))
 
         # Step 1 -- get all the activations.
         caches = []
@@ -224,16 +245,8 @@ class PolyHLModel(HookedRootModule):
             #     hl_model = hl_model.hl_model
 
             #clip token vocab down to task vocab size; replace out-of-task tokens with PAD.
-            # encoder = hl_model.tracr_input_encoder
-            # pad_id = encoder.encoding_map[TRACR_PAD]
-            # d_vocab = hl_model.cfg.d_vocab
-            # n_ctx = hl_model.cfg.n_ctx
-            pad_id = hl_model.vocab_dict['PAD']
-            d_vocab = self.d_vocab_list[i]
-            n_ctx = self.n_ctx_list[i]
-            task_tokens = torch.clone(tokens)[:, 1:n_ctx+1]
-            task_tokens[task_tokens >= d_vocab] = pad_id
-            _, cache = hl_model.run_with_cache((task_tokens, None, None))
+            these_tokens = task_tokens[i]
+            _, cache = hl_model.run_with_cache((these_tokens, None, None))
             caches.append(cache)
         
         # for k, i in caches[0].items():
@@ -283,9 +296,7 @@ class PolyHLModel(HookedRootModule):
       
 
         # Step 3 -- run with a bunch of hooks on the tracr models using the cache, actually doing interventions, and return intervened output.
-        outputs = torch.zeros((tokens.shape[0], tokens.shape[1], self.cfg.d_vocab)).to(self.cfg.device)
-        self.mask = torch.ones_like(outputs).to(bool)
-        self.mask[:,0] = False
+        model_outputs = []
         for i, hl_model in enumerate(self.hl_models):
             # if isinstance(hl_model, IITHLModel):
             #     hl_model = hl_model.hl_model
@@ -293,9 +304,7 @@ class PolyHLModel(HookedRootModule):
             # encoder = hl_model.tracr_input_encoder
             # pad_id = encoder.encoding_map[TRACR_PAD]
 
-            pad_id = hl_model.vocab_dict['PAD']
-            task_tokens = torch.clone(tokens)[:, 1:self.n_ctx_list[i]+1]
-            task_tokens[task_tokens >= self.d_vocab_list[i]] = pad_id
+            these_tokens = task_tokens[i]
 
             # define hooks.
 
@@ -310,8 +319,6 @@ class PolyHLModel(HookedRootModule):
             hooks = []
             #go through self.corr_dict and link up each hook with corresponding hook(s) in HL tracr models.
             for layer in range(self.cfg.n_layers):
-                if layer == 0:
-                    continue
 
                 #MLP
                 hook_name = f'blocks.{layer}.{self.mlp_suffix}'
@@ -331,12 +338,10 @@ class PolyHLModel(HookedRootModule):
                             # hooks.append((node.name, partial(attn_replacement_hook, index=TorchIndex([None,None,head,None])))) # for tracr.
 
             # print(hooks)
-            model_output = hl_model.run_with_hooks((task_tokens, None, None), fwd_hooks=hooks)
-            outputs[task_ids == i, 1:self.n_ctx_list[i]+1,:self.d_vocab_list[i]] = model_output[task_ids == i].to(self.cfg.device)
-            outputs[task_ids == i, 0, 0] = 1
+            model_output = hl_model.run_with_hooks((these_tokens, None, None), fwd_hooks=hooks)
+            model_outputs.append(model_output)
         
-            #TODO: Make & return (or store?) a mask for evaluating the loss on the output.
-            self.mask[task_ids == i, self.n_ctx_list[i]+1:] = False
+        outputs = self.sort_output(tokens, model_outputs, task_ids)
 
         return outputs
     

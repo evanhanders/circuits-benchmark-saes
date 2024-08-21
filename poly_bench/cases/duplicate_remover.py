@@ -115,7 +115,6 @@ class HighLevelDuplicateRemover(PolyCase):
         output = self.output_hook(self.masked_output(tokens, equal.to(bool)))
 
         # output pad at bos spot
-        print(output)
         true_output = t.nn.functional.one_hot(output, num_classes=self.d_vocab).float()
         
         return true_output
