@@ -17,6 +17,7 @@ numpy = "<2.0.0"
 huggingface-hub = ">=0.23.0"
 jupyter = "^1.0.0"
 iit = { git = "https://github.com/evanhanders/iit.git", branch = "training_improvements"}
+pyyaml = "^6.0.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.2"
