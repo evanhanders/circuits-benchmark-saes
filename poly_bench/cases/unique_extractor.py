@@ -20,12 +20,11 @@ from .utils import CustomDataset, create_tokenizer
 from .poly_case import PolyCase, PolyBenchDataset
 
 CASE_VOCAB = {
-        'a': 0, 
-        'b': 1,
-        'c': 2, 
-        'PAD': 3, 
-        'BOS': 4, 
-        'UNK': 5
+        'BOS': 0, 
+        'PAD': 1, 
+        'a': 2, 
+        'b': 3,
+        'c': 4, 
         } 
 
 REVERSE_CASE_VOCAB = {v: k for k, v in CASE_VOCAB.items()}
@@ -213,7 +212,7 @@ class UniqueExtractorDataset(PolyBenchDataset):
                 new_markers[i] = cache['output_mlp']
         self.markers = new_markers
         self.labels = np.copy(self.markers)
-        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys()) - 1).float().numpy() #-1 to remove UNK.
+        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys())).float().numpy() #-1 to remove UNK.
 
 def test_HL_unique_extractor_components():
     """
@@ -225,9 +224,9 @@ def test_HL_unique_extractor_components():
     # parens balance check
     
     tokens = [
-        [4, 0, 0, 1, 2, 0, 1, 3, 3],
-        [4, 0, 1, 2, 2, 2, 2, 2, 2],
-        [4, 0, 1, 2, 3, 3, 3, 3, 3],
+        [0, 2, 2, 3, 4, 2, 3, 1, 1],
+        [0, 2, 3, 4, 4, 4, 4, 4, 4],
+        [0, 2, 3, 4, 1, 1, 1, 1, 1],
     ]
     a_counts = [
         [0, 1, 2, 2, 2, 3, 3, 3, 3],
@@ -267,9 +266,9 @@ def test_HL_unique_extractor_components():
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
     ]
     true_output = [
-        [4, 0, 3, 1, 2, 3, 3, 3, 3],
-        [4, 0, 1, 2, 3, 3, 3, 3, 3],
-        [4, 0, 1, 2, 3, 3, 3, 3, 3],
+        [0, 2, 1, 3, 4, 1, 1, 1, 1],
+        [0, 2, 3, 4, 1, 1, 1, 1, 1],
+        [0, 2, 3, 4, 1, 1, 1, 1, 1],
     ]
 
     tokens = t.tensor(tokens).to(int)

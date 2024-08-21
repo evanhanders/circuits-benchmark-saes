@@ -22,11 +22,10 @@ from .poly_case import PolyCase, PolyBenchDataset
 
 
 CASE_VOCAB = {
-        '(': 0, 
-        ')': 1, 
-        'PAD': 2, 
-        'BOS': 3, 
-        'UNK': 4
+        'BOS': 0, 
+        'PAD': 1, 
+        '(': 2, 
+        ')': 3, 
         } 
 
 CASE_REVERSE_VOCAB = {v: k for k, v in CASE_VOCAB.items()}
@@ -118,9 +117,9 @@ class HighLevelLeftGreater(PolyCase):
 
         greater_than = self.mlp0_hook(self.greater_than(left_parens, right_parens))
         
-        # output pad at bos spot
+        # output 2 at bos spot
         output = (greater_than).to(int)
-        output[:,0] = self.vocab_dict['PAD']
+        output[:,0] = 2
         true_output = t.nn.functional.one_hot(output, num_classes=self.d_vocab).float().to(self.device)
         
         return true_output
@@ -142,7 +141,7 @@ class LeftGreaterDataset(PolyBenchDataset):
             )
         
     def left_greater(self,  sample):
-        return np.cumsum(sample == 0) > np.cumsum(sample == 1)
+        return np.cumsum(sample == self.map_dict['(']) > np.cumsum(sample == self.map_dict[')'])
 
     def _generate_token_subset(self, N_samples, n_ctx, left_greater=True):        
         generated_samples = min(N_samples, 1000)
@@ -185,8 +184,8 @@ class LeftGreaterDataset(PolyBenchDataset):
             greater[:self.N_samples // 2],
             less[:self.N_samples // 2],
         ], dim = 0)
-        dataset[dataset == 1]  = 0 #(
-        dataset[dataset == -1] = 1 #)
+        dataset[dataset == 1]  = self.map_dict['(']
+        dataset[dataset == -1] = self.map_dict[')']
         dataset = dataset[t.randperm(dataset.shape[0]),:] #shuffle the dataset.
 
         #add BOS token to beginning and pad to end
@@ -209,20 +208,20 @@ class LeftGreaterDataset(PolyBenchDataset):
                 new_markers[i,1:][mask] = 1
         self.markers = new_markers
         self.labels = np.copy(self.markers)
-        self.labels[:,0] = self.map_dict['PAD'] #set pad as answer for bos token.
+        self.labels[:,0] = 2 #set 2 as answer for bos token.
         if skip_first:
-            self.labels[:,1] = self.map_dict['PAD'] #set pad as answer for bos token.
-        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys())-1).float().numpy()
+            self.labels[:,1] = 2 #set 2 as answer for bos token.
+        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys())).float().numpy()
 
 
 def test_HL_left_greater_components():
     # parens balance check
     tokens = [
-        [3, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2],
-        [3, 0, 0, 0, 0, 0, 1, 1, 1, 2, 2],
-        [3, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
-        [3, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
-        [3, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1],
+        [0, 2, 3, 2, 3, 2, 3, 1, 1, 1, 1],
+        [0, 2, 2, 2, 2, 2, 3, 3, 3, 1, 1],
+        [0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2],
+        [0, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3],
+        [0, 3, 3, 2, 3, 3, 2, 3, 3, 2, 3],
     ]
     true_lefts = [
         [ 0,  1,  1,  2,  2,  3,  3,  3,  3,  3,  3],

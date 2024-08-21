@@ -1,32 +1,26 @@
-[build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "cluster-setup"
-description = "Sparse autoencoders and other interp"
-readme = "README.md"
-requires-python = ">=3.10"
-keywords = ["interpretability", "explainable-ai"]
-license = {text = "MIT License"}
-dependencies = [
-    "accelerate",   # For device_map in from_pretrained
-    "datasets",
-    "einops",
-    "jaxtyping",
-    "safetensors",
-    "simple-parsing",
-    "torch",
-    "transformers",
-    "transformer_lens",
-    "sae_lens==3.12.1",
-    "triton",
-    "mamba_lens @ git+https://github.com/Phylliida/MambaLens.git",
-    # format/CI
-    "ruff",
-    "pyright",
-    "pytest",
-    "numpy<2.0.0",  # 2.0 Unsupported by datasets
-    "huggingface-hub==0.24.0", # per https://github.com/run-llama/llama_index/discussions/14605
-]
+[tool.poetry]
+name = "poly-bench"
 version = "0.1.0"
+description = "Polysemantic benchmark transformers"
+authors = ["Evan Anders <evanhanders@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+datasets = "^2.21.0"
+einops = "^0.8.0"
+jaxtyping = "^0.2.33"
+safetensors = "^0.4.4"
+transformers = "^4.44.1"
+numpy = "<2.0.0"
+huggingface-hub = ">=0.23.0"
+jupyter = "^1.0.0"
+iit = { git = "https://github.com/evanhanders/iit.git", branch = "training_improvements"}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

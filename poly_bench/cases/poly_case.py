@@ -19,7 +19,7 @@ class PolyCase(HookedRootModule, ABC):
     def __init__(self, vocab_dict: dict[str, int], device: str = get_device()):
         super().__init__()
         self.vocab_dict = vocab_dict
-        self.d_vocab = len(vocab_dict.keys()) - 1 #-1 because we don't do computations for UNK token
+        self.d_vocab = len(vocab_dict.keys())
         self.device = device
 
     @abstractmethod
@@ -95,8 +95,8 @@ class PolyBenchDataset(ABC):
         return self.dataset
 
     def _generate_random_tokens(self, N_samples, n_ctx):
-        d_vocab = len(self.map_dict.keys()) - 3 #remove BOS, PAD, UNK -- always assume these are the last 3 in the dictionary.
-        samples =  t.randint(0, d_vocab, (N_samples, n_ctx))
+        d_vocab = len(self.map_dict.keys())
+        samples =  t.randint(2, d_vocab, (N_samples, n_ctx))#remove BOS, PAD -- always assume these are the first 2 in the dictionary.
         return t.unique(samples, dim=0)
     
     def get_IIT_train_test_set(self, train_frac=0.8, seed=0):

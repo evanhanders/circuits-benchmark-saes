@@ -21,9 +21,8 @@ from .poly_case import PolyCase, PolyBenchDataset
 CASE_VOCAB = {
         'BOS': 0, 
         'PAD': 1, 
-        'UNK': 2,
-        '(': 3, 
-        ')': 4, 
+        '(': 2, 
+        ')': 3, 
         } 
 
 CASE_REVERSE_VOCAB = {v: k for k, v in CASE_VOCAB.items()}
@@ -299,17 +298,17 @@ class BalancedParensDataset(PolyBenchDataset):
         self.labels = np.copy(self.markers)
         self.labels[self.labels != 1] = 0 #passes or fails.
         self.labels[:,0] = 2 #set pad as answer for bos token.
-        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=4).float().numpy()
+        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys())).float().numpy()
 
 
 def test_HL_parens_balancer_components():
     # parens balance check
     tokens = [
-        [0, 3, 4, 3, 4, 3, 4, 1, 1, 1, 1],
-        [0, 3, 3, 3, 3, 3, 4, 4, 4, 1, 1],
-        [0, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3],
-        [0, 3, 4, 3, 4, 3, 4, 3, 4, 3, 4],
-        [0, 4, 4, 3, 4, 4, 3, 4, 4, 3, 4],
+        [0, 2, 3, 2, 3, 2, 3, 1, 1, 1, 1],
+        [0, 2, 2, 2, 2, 2, 3, 3, 3, 1, 1],
+        [0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2],
+        [0, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3],
+        [0, 3, 3, 2, 3, 3, 2, 3, 3, 2, 3],
     ]
     true_lefts = [
         [ 0,  1,  1,  2,  2,  3,  3,  3,  3,  3,  3],

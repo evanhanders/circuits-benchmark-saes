@@ -20,12 +20,11 @@ from .utils import CustomDataset, create_tokenizer
 from .poly_case import PolyCase, PolyBenchDataset
 
 CASE_VOCAB = {
-        'a': 0, 
-        'b': 1,
-        'c': 2, 
-        'PAD': 3, 
-        'BOS': 4, 
-        'UNK': 5
+        'BOS': 0, 
+        'PAD': 1, 
+        'a': 2, 
+        'b': 3,
+        'c': 4, 
         } 
 
 REVERSE_CASE_VOCAB = {v: k for k, v in CASE_VOCAB.items()}
@@ -116,6 +115,7 @@ class HighLevelDuplicateRemover(PolyCase):
         output = self.output_hook(self.masked_output(tokens, equal.to(bool)))
 
         # output pad at bos spot
+        print(output)
         true_output = t.nn.functional.one_hot(output, num_classes=self.d_vocab).float()
         
         return true_output
@@ -166,7 +166,7 @@ class DuplicateRemoverDataset(PolyBenchDataset):
                 new_markers[i] = cache['output_hook']
         self.markers = new_markers
         self.labels = np.copy(self.markers)
-        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys()) - 1).float().numpy() #-1 to remove UNK.
+        self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys())).float().numpy() #-1 to remove UNK.
 
 def test_HL_duplicate_remover_components():
     # parens balance check
@@ -177,10 +177,8 @@ def test_HL_duplicate_remover_components():
     ]
     tokenizer = create_duplicate_remover_tokenizer()
     encoded = [tokenizer.encode(t) for t in tokens]
-    print(encoded)
     true_prev_tokens = [[CASE_VOCAB['PAD']] + e[:-1] for e in encoded]
     true_equal = [[a == b for a, b in zip(e, p)] for e, p in zip(encoded, true_prev_tokens)]
-    print(true_equal)
     true_output = [[CASE_VOCAB['PAD'] if eq else a for a, eq in zip(encoded[i], true_equal[i])] for i in range(len(tokens))]
 
     tokens = t.Tensor(encoded).to(int)

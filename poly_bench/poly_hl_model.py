@@ -14,9 +14,9 @@ from iit.utils.correspondence import Correspondence
 from iit.utils.nodes import HLNode
 from iit.utils.iit_dataset import train_test_split, IITDataset
 
-from circuits_benchmark.utils.iit.iit_hl_model import IITHLModel
-from circuits_benchmark.benchmark.tracr_benchmark_case import TracrBenchmarkCase
-from circuits_benchmark.benchmark.vocabs import TRACR_PAD
+# from circuits_benchmark.utils.iit.iit_hl_model import IITHLModel
+# from circuits_benchmark.benchmark.tracr_benchmark_case import TracrBenchmarkCase
+# from circuits_benchmark.benchmark.vocabs import TRACR_PAD
 
 from cases.poly_case import PolyCase, PolyBenchDataset
 from cases.utils import CustomDataset
@@ -333,7 +333,7 @@ class PolyHLModel(HookedRootModule):
             # print(hooks)
             model_output = hl_model.run_with_hooks((task_tokens, None, None), fwd_hooks=hooks)
             outputs[task_ids == i, 1:self.n_ctx_list[i]+1,:self.d_vocab_list[i]] = model_output[task_ids == i].to(self.cfg.device)
-            outputs[task_ids == i, 0, hl_model.vocab_dict['PAD']] = 1
+            outputs[task_ids == i, 0, 0] = 1
         
             #TODO: Make & return (or store?) a mask for evaluating the loss on the output.
             self.mask[task_ids == i, self.n_ctx_list[i]+1:] = False
