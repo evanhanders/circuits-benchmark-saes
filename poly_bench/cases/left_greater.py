@@ -89,11 +89,6 @@ class HighLevelLeftGreater(PolyCase):
             d_vocab = self.d_vocab,
             act_fn = "relu"
         )
-    
-    def get_ll_model(self, cfg: Optional[HookedTransformerConfig] = None) -> HookedTransformer:
-        if cfg is None:
-            cfg = self.get_ll_model_cfg()
-        return HookedTransformer(cfg)
 
     def get_correspondence(self) -> Correspondence:
         corr = {

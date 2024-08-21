@@ -19,11 +19,11 @@ from .poly_case import PolyCase, PolyBenchDataset
 
 
 CASE_VOCAB = {
-        '(': 0, 
-        ')': 1, 
-        'PAD': 2, 
-        'BOS': 3, 
-        'UNK': 4
+        'BOS': 0, 
+        'PAD': 1, 
+        'UNK': 2,
+        '(': 3, 
+        ')': 4, 
         } 
 
 CASE_REVERSE_VOCAB = {v: k for k, v in CASE_VOCAB.items()}
@@ -121,11 +121,6 @@ class HighLevelParensBalanceChecker(PolyCase):
             d_vocab = self.d_vocab,
             act_fn = "relu"
         )
-    
-    def get_ll_model(self, cfg: Optional[HookedTransformerConfig] = None) -> HookedTransformer:
-        if cfg is None:
-            cfg = self.get_ll_model_cfg()
-        return HookedTransformer(cfg)
 
     def get_correspondence(self) -> Correspondence:
         corr = {
@@ -167,7 +162,7 @@ class HighLevelParensBalanceChecker(PolyCase):
         hor_lookback = self.horizon_lookback_hook(self.horizon_lookback_head(hor_check))
 
         output = (ele_check*hor_lookback).to(int)
-        output[:,0] = 2
+        output[:,0] = 2 # hardcoded in dataset.
         output = self.mlp2_hook(output)
 
         # output pad at bos spot
@@ -192,13 +187,14 @@ class BalancedParensDataset(PolyBenchDataset):
             )
 
     def passes_balance(self,  sample):
-        return np.cumsum(sample == 0) == np.cumsum(sample == 1)
+        return np.cumsum(sample == self.map_dict['(']) == np.cumsum(sample == self.map_dict[')'])
         
     def passes_horizon(self, sample):
         mod = np.copy(sample)
-        mod[mod == 1] = -1
-        mod[mod == 0] = 1
-        mod[mod > 1] = 0
+        mod[mod == self.map_dict[')']] = -1
+        mod[mod == self.map_dict['(']] = -2
+        mod[mod > 0] = 0
+        mod[mod == -2] = 1
         horizon = np.cumsum(mod)
         horizon_bool = np.ones(horizon.shape, dtype=bool)
         horizon_bool[horizon < 0] = 0
@@ -279,8 +275,8 @@ class BalancedParensDataset(PolyBenchDataset):
             fail_bal[:self.N_samples // 4],
             fail_both[:self.N_samples // 4]
         ], dim = 0)
-        dataset[dataset == 1]  = 0 #(
-        dataset[dataset == -1] = 1 #)
+        dataset[dataset == 1]  = self.map_dict['(']
+        dataset[dataset == -1] = self.map_dict[')']
         dataset = dataset[t.randperm(dataset.shape[0]),:] #shuffle the dataset.
 
         #add BOS token to beginning and pad to end
@@ -309,11 +305,11 @@ class BalancedParensDataset(PolyBenchDataset):
 def test_HL_parens_balancer_components():
     # parens balance check
     tokens = [
-        [3, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2],
-        [3, 0, 0, 0, 0, 0, 1, 1, 1, 2, 2],
-        [3, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
-        [3, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
-        [3, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1],
+        [0, 3, 4, 3, 4, 3, 4, 1, 1, 1, 1],
+        [0, 3, 3, 3, 3, 3, 4, 4, 4, 1, 1],
+        [0, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3],
+        [0, 3, 4, 3, 4, 3, 4, 3, 4, 3, 4],
+        [0, 4, 4, 3, 4, 4, 3, 4, 4, 3, 4],
     ]
     true_lefts = [
         [ 0,  1,  1,  2,  2,  3,  3,  3,  3,  3,  3],

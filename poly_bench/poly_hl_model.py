@@ -120,7 +120,7 @@ class PolyHLModel(HookedRootModule):
         self.d_vocab_list = [cfg.d_vocab for cfg in self.cfgs]
 
         self.cfg = HookedTransformerConfig(
-            n_layers = max(self.n_layers_list),
+            n_layers = max(self.n_layers_list) + 1, #add one for the input layer
             d_model = size_expansion*max(self.d_model_list),
             n_ctx = max(self.n_ctx_list) + 1,
             d_head = size_expansion*max(self.d_head_list),
@@ -150,16 +150,20 @@ class PolyHLModel(HookedRootModule):
         self.corr_mapping = defaultdict(list)
 
         corr_dict = {}
-        task_id_set = False
-        corr_dict['input_hook'] = [('blocks.0.hook_resid_pre', Ix[[None]], None),]
+
+        corr_dict[f'task_hook'] = [(f'blocks.0.{self.attn_suffix}', Ix[[None,None,0,None]], None),]
+        corr_dict['input_hook'] = [('blocks.1.hook_resid_pre', Ix[[None]], None),] #input hook of ll models is after an MLP
         for layer in range(self.cfg.n_layers):
+            if layer == 0:
+                continue
+
             # create MLP hooks
             mlp_hook_name = f'blocks.{layer}.{self.mlp_suffix}'
             for i, corr in enumerate(self.corrs):
                 not_yet_used = True
                 for k, v in corr.items():
                     for node in v:
-                        if node.name == f"blocks.{layer}.{corr.suffixes['mlp']}":
+                        if node.name == f"blocks.{layer-1}.{corr.suffixes['mlp']}":
                             if not_yet_used:
                                 self.corr_mapping[mlp_hook_name].append([k])
                                 not_yet_used = False
@@ -179,7 +183,7 @@ class PolyHLModel(HookedRootModule):
                     not_yet_used = True
                     for k, v in corr.items():
                         for node in v:
-                            if node.name == f"blocks.{layer}.{corr.suffixes['attn']}" and node.index.as_index[2] == head:
+                            if node.name == f"blocks.{layer-1}.{corr.suffixes['attn']}" and node.index.as_index[2] == head:
                                 if not_yet_used:
                                     self.corr_mapping[corr_key].append([k])
                                     not_yet_used = False
@@ -188,11 +192,7 @@ class PolyHLModel(HookedRootModule):
                     if not_yet_used:
                         self.corr_mapping[corr_key].append(None)
                     else:
-                        corr_dict[f'attn_hooks.{layer}.{head}'] = [(attn_hook_name, Ix[[None,None,head,None]], None),]
-                
-                if not task_id_set and all([val is None for val in self.corr_mapping[corr_key]]):
-                    corr_dict[f'task_hook'] = [(attn_hook_name, Ix[[None,None,head,None]], None),]
-                    task_id_set = True     
+                        corr_dict[f'attn_hooks.{layer}.{head}'] = [(attn_hook_name, Ix[[None,None,head,None]], None),]  
             
         self.corr = Correspondence.make_corr_from_dict(corr_dict, suffixes={'attn': self.attn_suffix, 'mlp': self.mlp_suffix})
         self.setup()
@@ -200,7 +200,9 @@ class PolyHLModel(HookedRootModule):
     def is_categorical(self) -> bool:
         return True
 
-    def get_ll_model(self) -> HookedTransformer:
+    def get_ll_model(self, seed: Optional[int] = None) -> HookedTransformer:
+        if seed is not None:
+            self.cfg.seed = seed
         return HookedTransformer(self.cfg)
 
     def get_correspondence(self) -> Correspondence:
@@ -308,6 +310,8 @@ class PolyHLModel(HookedRootModule):
             hooks = []
             #go through self.corr_dict and link up each hook with corresponding hook(s) in HL tracr models.
             for layer in range(self.cfg.n_layers):
+                if layer == 0:
+                    continue
 
                 #MLP
                 hook_name = f'blocks.{layer}.{self.mlp_suffix}'

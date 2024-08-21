@@ -26,9 +26,12 @@ class PolyCase(HookedRootModule, ABC):
     def get_ll_model_cfg(self) -> HookedTransformerConfig:
         pass
     
-    def get_ll_model(self, cfg: Optional[HookedTransformerConfig] = None) -> HookedTransformer:
+    def get_ll_model(self, cfg: Optional[HookedTransformerConfig] = None, seed: Optional[int] = None) -> HookedTransformer:
         if cfg is None:
             cfg = self.get_ll_model_cfg()
+        if seed is not None:
+            cfg.seed = seed
+        cfg.init_mode = "xavier_normal"
         return HookedTransformer(cfg)
 
     @abstractmethod
