@@ -14,8 +14,6 @@ from huggingface_hub import upload_folder, hf_hub_download
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 from safetensors.torch import save_file, load_file
 
-from poly_bench.poly_hl_model import PolyHLModel
-
 class CustomDataset(Dataset):
     def __init__(self, 
                  inputs: Int[np.ndarray, "batch seq"], 
@@ -91,7 +89,7 @@ def load_from_hf(
     model.load_state_dict(load_file(model_tensors_file))
     return model
 
-def save_poly_model_to_dir(ll_model: HookedTransformer, hl_model: PolyHLModel, local_dir: str) -> pathlib.Path:
+def save_poly_model_to_dir(ll_model: HookedTransformer, hl_model, local_dir: str) -> pathlib.Path:
     directory = save_model_to_dir(ll_model, local_dir)
     model_cases = [str(model) for model in hl_model.hl_models]
     with open(directory / 'cases.json', 'w') as f:
