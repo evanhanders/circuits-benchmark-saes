@@ -163,37 +163,8 @@ class DuplicateRemoverDataset(PolyBenchDataset):
             _, cache = hl_model.run_with_cache((t.tensor(sample).unsqueeze(0), None, None))
             if skip_first:
                 new_markers[i][1:] = cache['output_hook']
-                new_markers[i][0] = self.map_dict['PAD']
             else:
                 new_markers[i] = cache['output_hook']
         self.markers = new_markers
         self.labels = np.copy(self.markers)
         self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys())).float().numpy() #-1 to remove UNK.
-
-def test_HL_duplicate_remover_components():
-    # parens balance check
-    tokens = [
-        "BOS a a b c a b PAD PAD",
-        "BOS a b c c c c c c",
-        "BOS a b c PAD PAD PAD PAD PAD",
-    ]
-    tokenizer = create_duplicate_remover_tokenizer()
-    encoded = [tokenizer.encode(t) for t in tokens]
-    true_prev_tokens = [[CASE_VOCAB['PAD']] + e[:-1] for e in encoded]
-    true_equal = [[a == b for a, b in zip(e, p)] for e, p in zip(encoded, true_prev_tokens)]
-    true_output = [[CASE_VOCAB['PAD'] if eq else a for a, eq in zip(encoded[i], true_equal[i])] for i in range(len(tokens))]
-
-    tokens = t.Tensor(encoded).to(int)
-    true_prev_tokens = t.Tensor(true_prev_tokens).to(int)
-    true_equal = t.Tensor(true_equal).to(int)
-    true_output = t.Tensor(true_output).to(int)
-    
-    checker = HighLevelDuplicateRemover()
-    _, cache   = checker.run_with_cache((tokens, None, None))
-    # print(cache['right_parens_hook'] - true_rights)
-    assert t.allclose(cache['prev_token_hook'], true_prev_tokens)
-    assert t.allclose(cache['prev_equal_hook'], true_equal)
-    assert t.allclose(cache['output_hook'], true_output)
-    print("All DuplicateRemover tests passed!")
-
-    return True

@@ -102,7 +102,7 @@ class PolyBenchDataset(ABC):
     def get_IIT_train_test_set(self, train_frac=0.8, seed=0):
 
         decorated_dset = CustomDataset(
-            inputs = self.dataset['tokens'],
+            inputs = np.array(self.dataset['tokens']),
             targets = np.array(self.dataset['labels']),
             markers = np.array(self.dataset['markers'])
         )

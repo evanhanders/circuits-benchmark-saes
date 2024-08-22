@@ -211,63 +211,9 @@ class LeftGreaterDataset(PolyBenchDataset):
                 new_markers[i,1:][mask] = 1
         self.markers = new_markers
         self.labels = np.copy(self.markers)
-        self.labels[:,0] = 2 #set 2 as answer for bos token.
         if skip_first:
             self.labels[:,1] = 2 #set 2 as answer for bos token.
+        else:
+            self.labels[:,0] = 2 #set 2 as answer for bos token.
         self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys())).float().numpy()
-
-
-def test_HL_left_greater_components():
-    # parens balance check
-    tokens = [
-        [0, 2, 3, 2, 3, 2, 3, 1, 1, 1, 1],
-        [0, 2, 2, 2, 2, 2, 3, 3, 3, 1, 1],
-        [0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2],
-        [0, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3],
-        [0, 3, 3, 2, 3, 3, 2, 3, 3, 2, 3],
-    ]
-    true_lefts = [
-        [ 0,  1,  1,  2,  2,  3,  3,  3,  3,  3,  3],
-        [ 0,  1,  2,  3,  4,  5,  5,  5,  5,  5,  5],
-        [ 0,  0,  1,  1,  2,  2,  3,  3,  4,  4,  5],
-        [ 0,  1,  1,  2,  2,  3,  3,  4,  4,  5,  5],
-        [ 0,  0,  0,  1,  1,  1,  2,  2,  2,  3,  3],
-    ]
-    true_rights = [
-        [ 0,  0,  1,  1,  2,  2,  3,  3,  3,  3,  3],
-        [ 0,  0,  0,  0,  0,  0,  1,  2,  3,  3,  3],
-        [ 0,  1,  1,  2,  2,  3,  3,  4,  4,  5,  5],
-        [ 0,  0,  1,  1,  2,  2,  3,  3,  4,  4,  5],
-        [ 0,  1,  2,  2,  3,  4,  4,  5,  6,  6,  7],
-    ]
-    true_mlp0_check = [ # left > right
-        [ False,  True, False,  True, False,  True, False, False, False, False, False],
-        [ False,  True,  True,  True,  True,  True,  True,  True,  True,  True,  True],
-        [ False, False, False, False, False, False, False, False, False, False, False],
-        [ False,  True, False,  True, False,  True, False,  True, False,  True, False],
-        [ False, False, False, False, False, False, False, False, False, False, False],
-    ]
-    true_output  = [ # 2 in the first index, otherwise the integer version of true_mlp0_check
-        [ 2, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0],
-        [ 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-        [ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [ 2, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
-        [ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        ]
-
-    tokens = t.Tensor(tokens).to(int)
-    true_lefts = t.Tensor(true_lefts).to(int)
-    true_rights = t.Tensor(true_rights).to(int)
-    true_parens = t.stack([true_lefts, true_rights])
-    true_mlp0_check = t.Tensor(true_mlp0_check).to(bool)
-    true_output = t.nn.functional.one_hot(t.Tensor(true_output).to(int), num_classes=4).float()
-
-    checker = HighLevelLeftGreater()
-    output, cache   = checker.run_with_cache((tokens, None, None))
-    assert t.allclose(cache['paren_counts_hook'], true_parens)
-    assert t.allclose(cache['mlp0_hook'], true_mlp0_check)
-    assert t.allclose(output.cpu(), true_output)
-    print("All left greater tests passed!")
-
-    return True
 

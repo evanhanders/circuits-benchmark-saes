@@ -18,8 +18,8 @@ from iit.utils.iit_dataset import train_test_split, IITDataset
 # from circuits_benchmark.benchmark.tracr_benchmark_case import TracrBenchmarkCase
 # from circuits_benchmark.benchmark.vocabs import TRACR_PAD
 
-from cases.poly_case import PolyCase, PolyBenchDataset
-from cases.utils import CustomDataset
+from .cases.poly_case import PolyCase, PolyBenchDataset
+from .utils import CustomDataset
 
 
 class PolyModelDataset:
@@ -53,12 +53,14 @@ class PolyModelDataset:
             if dataset.labels.shape[-1] < max_d_vocab:
                 padding = torch.zeros((dataset.labels.shape[0], dataset.labels.shape[1], max_d_vocab - dataset.labels.shape[-1]))
                 dataset.labels = torch.cat([torch.tensor(dataset.labels), padding], dim=-1)
+            else:
+                dataset.labels = torch.tensor(dataset.labels)
             dataset.build_dataset()
 
 
         #combine all datasets into one.
-        tokens = torch.cat([torch.tensor(dataset.tokens) for dataset in datasets], dim=0)
-        labels = torch.cat([torch.tensor(dataset.labels) for dataset in datasets], dim=0)
+        tokens = torch.cat([dataset.tokens for dataset in datasets], dim=0)
+        labels = torch.cat([dataset.labels for dataset in datasets], dim=0)
         markers = torch.cat([torch.tensor(dataset.markers) for dataset in datasets], dim=0)
 
         #shuffle the dataset

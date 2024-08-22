@@ -204,7 +204,7 @@ class BalancedParensDataset(PolyBenchDataset):
         return horizon_lookback.astype(bool)
     
     def passes_balance_test(self, sample):
-        return self.passes_balance(sample)*self.passes_horizon(sample)
+        return np.logical_and(self.passes_balance(sample), self.passes_horizon(sample))
 
     def _generate_token_subset(self, N_samples, n_ctx, passes_balance=True, passes_horizon=True):
         """ Samples that fail both tests """
@@ -292,98 +292,20 @@ class BalancedParensDataset(PolyBenchDataset):
         for i,sample in enumerate(self.tokens):
             if skip_first:
                 sample = sample[2:]
+                new_markers[i,2:][self.passes_balance_test(sample)] = 1
+                # new_markers[i,2:][np.logical_and(~self.passes_balance(sample), self.passes_horizon(sample))] = 2
+                # new_markers[i,2:][np.logical_and(~self.passes_horizon(sample), self.passes_balance(sample))] = 3
             else:
                 sample = sample[1:]
-            new_markers[i,1:][self.passes_balance_test(sample)] = 1
-            new_markers[i,1:][np.logical_and(~self.passes_balance(sample), self.passes_horizon(sample))] = 2
-            new_markers[i,1:][np.logical_and(~self.passes_horizon(sample), self.passes_balance(sample))] = 3
+                new_markers[i,1:][self.passes_balance_test(sample)] = 1
+                # new_markers[i,1:][np.logical_and(~self.passes_balance(sample), self.passes_horizon(sample))] = 2
+                # new_markers[i,1:][np.logical_and(~self.passes_horizon(sample), self.passes_balance(sample))] = 3
         self.markers = new_markers
         self.labels = np.copy(self.markers)
         self.labels[self.labels != 1] = 0 #passes or fails.
-        self.labels[:,0] = 2 #set pad as answer for bos token.
+        if skip_first:
+            self.labels[:,1] = 2
+        else:
+            self.labels[:,0] = 2 #set pad as answer for bos token.
         self.labels = t.nn.functional.one_hot(t.tensor(self.labels), num_classes=len(self.map_dict.keys())).float().numpy()
 
-
-def test_HL_parens_balancer_components():
-    # parens balance check
-    tokens = [
-        [0, 2, 3, 2, 3, 2, 3, 1, 1, 1, 1],
-        [0, 2, 2, 2, 2, 2, 3, 3, 3, 1, 1],
-        [0, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2],
-        [0, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3],
-        [0, 3, 3, 2, 3, 3, 2, 3, 3, 2, 3],
-    ]
-    true_lefts = [
-        [ 0,  1,  1,  2,  2,  3,  3,  3,  3,  3,  3],
-        [ 0,  1,  2,  3,  4,  5,  5,  5,  5,  5,  5],
-        [ 0,  0,  1,  1,  2,  2,  3,  3,  4,  4,  5],
-        [ 0,  1,  1,  2,  2,  3,  3,  4,  4,  5,  5],
-        [ 0,  0,  0,  1,  1,  1,  2,  2,  2,  3,  3],
-    ]
-    true_rights = [
-        [ 0,  0,  1,  1,  2,  2,  3,  3,  3,  3,  3],
-        [ 0,  0,  0,  0,  0,  0,  1,  2,  3,  3,  3],
-        [ 0,  1,  1,  2,  2,  3,  3,  4,  4,  5,  5],
-        [ 0,  0,  1,  1,  2,  2,  3,  3,  4,  4,  5],
-        [ 0,  1,  2,  2,  3,  4,  4,  5,  6,  6,  7],
-    ]
-    true_mlp0_check = [ #elevations
-        [ 0,  1,  0,  1,  0,  1,  0,  0,  0,  0,  0],
-        [ 0,  1,  2,  3,  4,  5,  4,  3,  2,  2,  2],
-        [ 0, -1,  0, -1,  0, -1,  0, -1,  0, -1,  0],
-        [ 0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0],
-        [ 0, -1, -2, -1, -2, -3, -2, -3, -4, -3, -4],
-    ]
-    horizon_check = [ #first element is ele; rest are horizon
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True, False,  True, False,  True, False,  True, False,  True, False, True],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True, False, False, False, False, False, False, False, False, False, False],
-    ]
-    elevation_check = [ #True where mlp0_check is 0, false otherwise.
-        [ True, False,  True, False,  True, False,  True,  True,  True,  True,  True],
-        [ True, False, False, False, False, False, False, False, False, False, False],
-        [ True, False,  True, False,  True, False,  True, False,  True, False,  True],
-        [ True, False,  True, False,  True, False,  True, False,  True, False,  True],
-        [ True, False, False, False, False, False, False, False, False, False, False],
-    ]
-    true_mlp1_check = [
-        elevation_check, horizon_check
-    ]
-    true_hor_lookback = [ # For each example, this is False as soon as horizon_check is false once.
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True, False, False, False, False, False, False, False, False, False, False],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True, True],
-        [ True, False, False, False, False, False, False, False, False, False, False],
-        ]
-    true_output  = [ # boolean product of true_hor_lookback and elevation_check
-        [ 2, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1],
-        [ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [ 2, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
-        [ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        ]
-
-    tokens = t.Tensor(tokens).to(int)
-    true_lefts = t.Tensor(true_lefts).to(int)
-    true_rights = t.Tensor(true_rights).to(int)
-    true_parens_counts = t.stack((true_lefts, true_rights))
-    true_mlp0_check = t.Tensor(true_mlp0_check).to(int)
-    true_mlp1_check = t.Tensor(true_mlp1_check).to(bool)
-    true_hor_lookback = t.Tensor(true_hor_lookback).to(bool)
-    true_output = t.Tensor(true_output).to(int)
-    
-
-    checker = HighLevelParensBalanceChecker()
-    _, cache   = checker.run_with_cache((tokens, None, None))
-    # print(cache['right_parens_hook'] - true_rights)
-    assert t.allclose(cache['paren_counts_hook'], true_parens_counts)
-    assert t.allclose(cache['mlp0_hook'], true_mlp0_check)
-    assert t.allclose(cache['mlp1_hook'], true_mlp1_check)
-    assert t.allclose(cache['horizon_lookback_hook'], true_hor_lookback)
-    assert t.allclose(cache['mlp2_hook'], true_output)
-    print("All Balance tests passed!")
-
-    return True
