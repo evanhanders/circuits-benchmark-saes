@@ -69,7 +69,6 @@ class PolyBenchDataset(ABC):
         self.generate_labels()
         self.build_dataset()
     
-
     def build_dataset(self) -> None:
         self.dataset = Dataset.from_dict({
                 'tokens' : self.tokens,

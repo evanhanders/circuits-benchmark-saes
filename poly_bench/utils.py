@@ -4,6 +4,7 @@ from typing import Optional
 from jaxtyping import Float, Int
 
 import yaml
+import json
 from tokenizers import Tokenizer, models, normalizers, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 from datasets import Dataset
@@ -12,6 +13,8 @@ import numpy as np
 from huggingface_hub import upload_folder, hf_hub_download
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 from safetensors.torch import save_file, load_file
+
+from poly_bench.poly_hl_model import PolyHLModel
 
 class CustomDataset(Dataset):
     def __init__(self, 
@@ -53,7 +56,7 @@ def create_tokenizer(vocab: dict) -> PreTrainedTokenizerFast:
     })
     return hf_tokenizer
 
-def save_model_to_dir(model: HookedTransformer, local_dir: str):
+def save_model_to_dir(model: HookedTransformer, local_dir: str) -> pathlib.Path:
     directory = pathlib.Path(local_dir)
     directory.mkdir(parents=True, exist_ok=True)
     save_file(model.state_dict(), directory / 'model.safetensors')
@@ -63,6 +66,7 @@ def save_model_to_dir(model: HookedTransformer, local_dir: str):
         config_dict[k] = getattr(model.cfg, k)
     with open(directory / 'config.yaml', 'w') as f:
         yaml.dump(config_dict, f)
+    return directory
 
 
 def save_to_hf(local_dir: str, message: str, repo_name: str = 'evanhanders/polysemantic-benchmarks'):
@@ -87,4 +91,11 @@ def load_from_hf(
     model.load_state_dict(load_file(model_tensors_file))
     return model
 
+def save_poly_model_to_dir(ll_model: HookedTransformer, hl_model: PolyHLModel, local_dir: str) -> pathlib.Path:
+    directory = save_model_to_dir(ll_model, local_dir)
+    model_cases = [str(model) for model in hl_model.hl_models]
+    with open(directory / 'cases.json', 'w') as f:
+        json.dump(model_cases, f)
+
+    
     
