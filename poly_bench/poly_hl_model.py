@@ -1,25 +1,18 @@
 from collections import defaultdict
-from functools import partial
-from typing import Optional, Callable
+from typing import Optional, List
 from jaxtyping import Int, Float
 
-
-import torch
-import numpy as np
+import torch as t
 from torch import nn, Tensor
-from transformer_lens.hook_points import HookedRootModule, HookPoint
-from transformer_lens import HookedTransformerConfig, HookedTransformer
-from iit.utils.index import TorchIndex, Ix
-from iit.utils.correspondence import Correspondence
-from iit.utils.nodes import HLNode
-from iit.utils.iit_dataset import train_test_split, IITDataset
+from transformer_lens.hook_points import HookedRootModule, HookPoint # type: ignore
+from transformer_lens import HookedTransformerConfig, HookedTransformer # type: ignore
+from iit.utils.index import TorchIndex, Ix # type: ignore
+from iit.utils.correspondence import Correspondence # type: ignore
+from iit.utils.iit_dataset import train_test_split, IITDataset # type: ignore
+from iit.utils.nodes import HLNode #type: ignore
 
-# from circuits_benchmark.utils.iit.iit_hl_model import IITHLModel
-# from circuits_benchmark.benchmark.tracr_benchmark_case import TracrBenchmarkCase
-# from circuits_benchmark.benchmark.vocabs import TRACR_PAD
-
-from .cases.poly_case import PolyCase, PolyBenchDataset
-from .utils import CustomDataset
+from .cases.poly_case import PolyCase, PolyBenchDataset # type: ignore
+from .utils import SimpleDataset # type: ignore
 
 
 class PolyModelDataset:
@@ -41,7 +34,7 @@ class PolyModelDataset:
         max_d_vocab = 0
         for i, dataset in enumerate(datasets):
             padding = [dataset.map_dict['PAD']]*(n_ctx - dataset.n_ctx - 1) 
-            dataset.tokens = torch.tensor([ [i] + seq.tolist() + padding for seq in dataset.tokens])
+            dataset.tokens = t.tensor([ [i] + list(seq) + padding for seq in dataset.tokens])
             dataset.map_tokens_to_str()
             dataset.generate_labels(skip_first=True)
             if dataset.labels.shape[-1] > max_d_vocab:
@@ -51,29 +44,29 @@ class PolyModelDataset:
         for i, dataset in enumerate(datasets):
             #ensure that last dim of dataset.labels has length max_d_vocab; if not, expand with zeros.
             if dataset.labels.shape[-1] < max_d_vocab:
-                padding = torch.zeros((dataset.labels.shape[0], dataset.labels.shape[1], max_d_vocab - dataset.labels.shape[-1]))
-                dataset.labels = torch.cat([torch.tensor(dataset.labels), padding], dim=-1)
+                label_padding = t.zeros((dataset.labels.shape[0], dataset.labels.shape[1], max_d_vocab - dataset.labels.shape[-1]))
+                dataset.labels = t.cat([t.tensor(dataset.labels), label_padding], dim=-1)
             else:
-                dataset.labels = torch.tensor(dataset.labels)
+                dataset.labels = t.tensor(dataset.labels)
             dataset.build_dataset()
 
 
         #combine all datasets into one.
-        tokens = torch.cat([dataset.tokens for dataset in datasets], dim=0)
-        labels = torch.cat([dataset.labels for dataset in datasets], dim=0)
-        markers = torch.cat([torch.tensor(dataset.markers) for dataset in datasets], dim=0)
+        tokens = t.cat([d.tokens if isinstance(d.tokens, t.Tensor) else t.tensor(d.tokens) for d in datasets], dim=0)
+        labels = t.cat([d.labels if isinstance(d.labels, t.Tensor) else t.tensor(d.labels) for d in datasets], dim=0)
+        markers = t.cat([d.markers if isinstance(d.markers, t.Tensor) else t.tensor(d.markers) for d in datasets], dim=0)
 
         #shuffle the dataset
-        idx = torch.randperm(tokens.shape[0])
+        idx = t.randperm(tokens.shape[0])
         tokens = tokens[idx]
         labels = labels[idx]
         markers = markers[idx]
 
         #Build IIT datasets
-        self.dataset = CustomDataset(
+        self.dataset = SimpleDataset(
             inputs = tokens,
-            targets = np.array(labels),
-            markers = np.array(markers)
+            targets = labels,
+            markers = markers
         )
         train_dataset, test_dataset = train_test_split(
             self.dataset, test_size=1-train_frac, random_state=42
@@ -129,10 +122,11 @@ class PolyHLModel(HookedRootModule):
             d_vocab = max(self.d_vocab_list),
             act_fn = "relu"
         )
+        self.device = self.cfg.device
 
         # We need to store the shapes of the attn results because hook_result and hook_z have different shapes.
         self.attn_shapes = [] 
-        corr_dict = defaultdict(list)
+        
         for model_number, corr in enumerate(self.corrs):
             if corr.suffixes['attn'] == 'attn.hook_result':
                 self.attn_shapes.append(self.d_model_list[model_number])
@@ -149,9 +143,8 @@ class PolyHLModel(HookedRootModule):
 
         # Loop through each layer, (head and mlp) in the combined model.
         # Add a list of hooks that go to that head/mpl in the LL models.
-        self.corr_mapping = defaultdict(list)
-
-        corr_dict = {}
+        self.corr_mapping: dict[str, List[Optional[List[HLNode]]]] = defaultdict(list)
+        corr_dict: dict[str, List[Optional[tuple[str, TorchIndex, Optional[t.Any]]]]] = defaultdict(list)
 
         task_id_set = False
         corr_dict['input_hook'] = [('blocks.0.hook_resid_pre', Ix[[None]], None),]
@@ -167,7 +160,8 @@ class PolyHLModel(HookedRootModule):
                                 self.corr_mapping[mlp_hook_name].append([k])
                                 not_yet_used = False
                             else:
-                                self.corr_mapping[mlp_hook_name][i].append([k])
+                                assert isinstance(self.corr_mapping[mlp_hook_name][i], list)
+                                self.corr_mapping[mlp_hook_name][i].append([k]) #type: ignore
                 if not_yet_used:
                     self.corr_mapping[mlp_hook_name].append(None)
                 else:
@@ -187,7 +181,8 @@ class PolyHLModel(HookedRootModule):
                                     self.corr_mapping[corr_key].append([k])
                                     not_yet_used = False
                                 else:
-                                    self.corr_mapping[corr_key][i].append([k])
+                                    assert isinstance(self.corr_mapping[corr_key], list)
+                                    self.corr_mapping[corr_key][i].append([k]) #type: ignore
                     if not_yet_used:
                         self.corr_mapping[corr_key].append(None)
                     else:
@@ -205,14 +200,15 @@ class PolyHLModel(HookedRootModule):
     def get_ll_model(self, seed: Optional[int] = None) -> HookedTransformer:
         if seed is not None:
             self.cfg.seed = seed
+        self.cfg.init_mode = "xavier_normal"
         return HookedTransformer(self.cfg)
 
     def get_correspondence(self) -> Correspondence:
         return self.corr
 
     def sort_output(self, tokens: Tensor, model_outputs: list[Tensor], task_ids: Tensor) -> Tensor:
-        outputs = torch.zeros((tokens.shape[0], tokens.shape[1], self.cfg.d_vocab)).to(self.cfg.device)
-        self.mask = torch.ones_like(outputs).to(bool)
+        outputs = t.zeros((tokens.shape[0], tokens.shape[1], self.cfg.d_vocab)).to(self.cfg.device)
+        self.mask = t.ones_like(outputs).to(t.bool)
         self.mask[:,0] = False
         for i, hl_model in enumerate(self.hl_models):
             outputs[task_ids == i, 1:self.n_ctx_list[i]+1,:self.d_vocab_list[i]] = model_outputs[i][task_ids == i].to(self.cfg.device)
@@ -223,7 +219,7 @@ class PolyHLModel(HookedRootModule):
         
         return outputs
     
-    def forward(self, inputs: tuple[Int[torch.Tensor, "batch seq"], torch.Any, torch.Any]) -> Float[torch.Tensor, "batch seq logits"]:
+    def forward(self, inputs: tuple[Int[t.Tensor, "batch seq"], t.Any, t.Any]) -> Float[t.Tensor, "batch seq logits"]:
         tokens, _, _ = inputs
         tokens = self.input_hook(tokens)
         task_ids = tokens[:, 0]
@@ -234,10 +230,10 @@ class PolyHLModel(HookedRootModule):
 
             n_ctx = self.n_ctx_list[i]
             d_vocab = self.d_vocab_list[i]
-            task_tokens.append(torch.clone(tokens)[:, 1:n_ctx+1])
+            task_tokens.append(t.clone(tokens)[:, 1:n_ctx+1])
             bad_tokens_mask = task_tokens[-1] >= d_vocab
             #randomly sample from 2 to d_vocab-1 to replace out-of-task tokens.
-            task_tokens[-1][bad_tokens_mask] = torch.randint(2, d_vocab-1, (bad_tokens_mask.sum().item(),))
+            task_tokens[-1][bad_tokens_mask] = t.randint(2, d_vocab-1, (bad_tokens_mask.sum().item(),)).to(t.int)
 
         # Step 1 -- get all the activations.
         caches = []
@@ -264,22 +260,22 @@ class PolyHLModel(HookedRootModule):
             if self.mlp_suffix not in name and self.attn_suffix not in name:
                 continue
             # print(name, hooks)
-            data = []
+            data_list = []
             shapes = []
             slices = []
             numel = 0
             for i in range(len(self.hl_models)):
                 # print(name, hooks[i])
                 if hooks[i] is not None:
-                    for hook in hooks[i]:
+                    for hook in hooks[i]: #type: ignore
                         # print(hook, caches[i][hook].shape)
                         shapes.append(caches[i][hook].shape)
-                        data.append(caches[i][hook].flatten())
+                        data_list.append(caches[i][hook].flatten())
                         this_numel = caches[i][hook].numel()
                         slices.append(slice(numel, numel + this_numel))
                         numel += this_numel
             if numel > 0:
-                data = torch.cat(data)
+                data = t.cat(data_list)
                 if self.mlp_suffix in name:
                     layer = int(name.split('.')[1])
                     hook = self.mlp_hooks[layer]
@@ -291,7 +287,7 @@ class PolyHLModel(HookedRootModule):
                 idx = 0
                 for i in range(len(self.hl_models)):
                     if hooks[i] is not None:
-                        for j, hook in enumerate(hooks[i]):
+                        for j, hook in enumerate(hooks[i]): #type: ignore
                             caches[i][hook] = data[slices[idx]].reshape(shapes[idx])
                             idx += 1
                 
@@ -347,132 +343,4 @@ class PolyHLModel(HookedRootModule):
 
         return outputs
     
-    #TODO: implement masking for loss computation.
-    
-    # def get_IIT_loss_over_batch(
-    #     self,
-    #     base_input: tuple[Tensor, Tensor, Tensor],
-    #     ablation_input: tuple[Tensor, Tensor, Tensor],
-    #     hl_node: HLNode,
-    #     loss_fn: Callable[[Tensor, Tensor], Tensor],
-    # ) -> Tensor:
-    #     hl_output, ll_output = self.do_intervention(base_input, ablation_input, hl_node)
-    #     label_idx = self.get_label_idxs()
-    #     # IIT loss is only computed on the tokens we care about
-    #     valid_ll_output = (self.weighting*ll_output)[label_idx.as_index][self.mask]
-    #     valid_hl_output = (self.weighting*hl_output)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
-    #     loss = loss_fn(valid_ll_output, valid_hl_output)
-    #     return loss
-
-    # def get_behaviour_loss_over_batch(
-    #         self, 
-    #         base_input: tuple[Tensor, Tensor, Tensor], 
-    #         loss_fn: Callable[[Tensor, Tensor], Tensor]
-    #         ) -> Tensor:
-    #     base_x, base_y = base_input[0:2]
-    #     output = self.ll_model(base_x)
-    #     # Apply mask.
-    #     label_idx = self.get_label_idxs()
-    #     valid_out = (self.weighting*output)[label_idx.as_index][self.mask]
-    #     valid_base_y = (self.weighting*base_y)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
-    #     behavior_loss = loss_fn(valid_out, valid_base_y)
-    #     return behavior_loss
-    
-    # def get_SIIT_loss_over_batch(
-    #         self,
-    #         base_input: tuple[Tensor, Tensor, Tensor],
-    #         ablation_input: tuple[Tensor, Tensor, Tensor],
-    #         loss_fn: Callable[[Tensor, Tensor], Tensor]
-    # ) -> Tensor:
-    #     base_x, base_y = base_input[0:2]
-    #     ablation_x, _ = ablation_input[0:2]
-    #     ll_node = self.sample_ll_node()
-    #     _, cache = self.ll_model.run_with_cache(ablation_x)
-    #     self.ll_cache = cache
-    #     out = self.ll_model.run_with_hooks(
-    #         base_x, fwd_hooks=[(ll_node.name, self.make_ll_ablation_hook(ll_node))]
-    #     )
-    #     # print(out.shape, base_y.shape)
-    #     label_idx = self.get_label_idxs()
-    #     valid_out = (self.weighting*out)[label_idx.as_index][self.mask]
-    #     valid_base_y = (self.weighting*base_y)[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
-    #     siit_loss = loss_fn(valid_out, valid_base_y) 
-    #     return siit_loss
-
-
-    # def run_eval_step(
-    #         self, 
-    #         base_input: tuple[Tensor, Tensor, Tensor],
-    #         ablation_input: tuple[Tensor, Tensor, Tensor],
-    #         loss_fn: Callable[[Tensor, Tensor], Tensor]
-    #         ) -> dict:
-    #     atol = self.training_args["atol"]
-
-    #     # compute IIT loss and accuracy
-    #     label_idx = self.get_label_idxs()
-    #     hl_node = self.sample_hl_name()
-    #     hl_output, ll_output = self.do_intervention(base_input, ablation_input, hl_node)
-    #     hl_output.to(ll_output.device)
-    #     hl_output = hl_output[label_idx.as_index][self.mask]
-    #     ll_output = ll_output[label_idx.as_index][self.mask]
-    #     if self.hl_model.is_categorical():
-    #         loss = loss_fn(ll_output, hl_output)
-    #         if ll_output.shape == hl_output.shape:
-    #             # To handle the case when labels are one-hot
-    #             hl_output = torch.argmax(hl_output, dim=-1)
-    #         top1 = torch.argmax(ll_output, dim=-1)
-    #         accuracy = (top1 == hl_output).float().mean()
-    #         IIA = accuracy.item()
-    #     else:
-    #         loss = loss_fn(ll_output, hl_output)
-    #         IIA = ((ll_output - hl_output).abs() < atol).float().mean().item()
-
-    #     # compute behavioral accuracy
-    #     base_x, base_y = base_input[0:2]
-    #     output = self.ll_model(base_x)
-    #     output = output[label_idx.as_index][self.mask]
-    #     base_y = base_y[label_idx.as_index][self.mask]
-        
-    #     #TODO: how to apply weighting here?
-    #     if self.hl_model.is_categorical():
-    #         top1 = torch.argmax(output, dim=-1)
-    #         if output.shape == base_y.shape:
-    #             # To handle the case when labels are one-hot
-    #             # TODO: is there a better way?
-    #             base_y = torch.argmax(base_y, dim=-1)
-    #         accuracy = (top1 == base_y).float().mean()
-    #     else:
-    #         accuracy = ((output - base_y).abs() < atol).float().mean()    
-    #     base_x, base_y = base_input[0:2]
-    #     ablation_x, ablation_y = ablation_input[0:2]
-        
-    #     _, cache = self.ll_model.run_with_cache(ablation_x)
-    #     label_idx = self.get_label_idxs()
-    #     base_y = base_y[label_idx.as_index][self.mask].to(self.ll_model.cfg.device)
-    #     self.ll_cache = cache
-    #     accuracies = []
-    #     for node in self.nodes_not_in_circuit:
-    #         out = self.ll_model.run_with_hooks(
-    #             base_x, fwd_hooks=[(node.name, self.make_ll_ablation_hook(node))]
-    #         )
-    #         ll_output = out[label_idx.as_index][self.mask]
-    #         if self.hl_model.is_categorical():
-    #             if ll_output.shape == base_y.shape:
-    #                 base_y = torch.argmax(base_y, dim=-1)
-    #             top1 = torch.argmax(ll_output, dim=-1)
-    #             accuracy = (top1 == base_y).float().mean().item()
-    #         else:
-    #             accuracy = ((ll_output - base_y).abs() < self.training_args["atol"]).float().mean().item()
-    #         accuracies.append(accuracy)
-
-    #     if len(accuracies) > 0:
-    #         accuracy = float(np.mean(accuracies))
-    #     else:
-    #         accuracy = 1.0
-
-    #     return {
-    #         "val/iit_loss": loss.item(),
-    #         "val/IIA": IIA,
-    #         "val/accuracy": accuracy.item(),
-    #         "val/strict_accuracy": accuracy,
-    #     }
+    #TODO: implement masking for loss computation. Would be done in an inherited StrictIITModelPair.

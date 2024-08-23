@@ -18,6 +18,8 @@ huggingface-hub = ">=0.23.0"
 jupyter = "^1.0.0"
 iit = { git = "https://github.com/evanhanders/iit.git", branch = "training_improvements"}
 pyyaml = "^6.0.2"
+mypy = "^1.11.1"
+types-pyyaml = "^6.0.12.20240808"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.2"

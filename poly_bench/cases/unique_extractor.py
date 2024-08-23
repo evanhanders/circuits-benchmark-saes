@@ -16,8 +16,8 @@ from iit.utils.index import Ix
 from iit.utils.iit_dataset import train_test_split
 from iit.utils.iit_dataset import IITDataset
 
-from ..utils import CustomDataset, create_tokenizer
-from .poly_case import PolyCase, PolyBenchDataset
+
+from .poly_case import PolyCase, PolyBenchDataset, create_tokenizer
 
 CASE_VOCAB = {
         'BOS': 0, 
@@ -163,9 +163,9 @@ class HighLevelUniqueExtractor(PolyCase):
 
         output = self.output_mlp(self.mask_output(tokens, mask.to(bool)))
         # output pad at bos spot
-        true_output = t.nn.functional.one_hot(output, num_classes=self.d_vocab).float()
+        true_output = t.nn.functional.one_hot(output.long(), num_classes=self.d_vocab).float()
         
-        return true_output
+        return true_output.to(self.device)
 
     def __str__(self):
         return "unique_extractor_model"
@@ -210,7 +210,7 @@ class UniqueExtractorDataset(PolyBenchDataset):
             _, cache = hl_model.run_with_cache((t.tensor(sample).unsqueeze(0), None, None))
             if skip_first:
                 new_markers[i][1:] = cache['output_mlp']
-                new_markers[i][0] = self.map_dict['PAD']
+                new_markers[i][0] = 0
             else:
                 new_markers[i] = cache['output_mlp']
         self.markers = new_markers

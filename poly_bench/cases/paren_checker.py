@@ -14,8 +14,8 @@ from transformers import PreTrainedTokenizerFast
 from iit.utils.correspondence import Correspondence, HLNode, LLNode
 from iit.utils.index import Ix
 
-from ..utils import create_tokenizer
-from .poly_case import PolyCase, PolyBenchDataset
+
+from .poly_case import PolyCase, PolyBenchDataset, create_tokenizer
 
 
 CASE_VOCAB = {
@@ -204,6 +204,8 @@ class BalancedParensDataset(PolyBenchDataset):
         return horizon_lookback.astype(bool)
     
     def passes_balance_test(self, sample):
+        if isinstance(sample, t.Tensor):
+            sample = sample.numpy()
         return np.logical_and(self.passes_balance(sample), self.passes_horizon(sample))
 
     def _generate_token_subset(self, N_samples, n_ctx, passes_balance=True, passes_horizon=True):

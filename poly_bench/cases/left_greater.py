@@ -17,8 +17,8 @@ from iit.utils.index import Ix
 from iit.utils.iit_dataset import train_test_split
 from iit.utils.iit_dataset import IITDataset
 
-from ..utils import create_tokenizer
-from .poly_case import PolyCase, PolyBenchDataset
+
+from .poly_case import PolyCase, PolyBenchDataset, create_tokenizer
 
 
 CASE_VOCAB = {

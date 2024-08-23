@@ -8,11 +8,13 @@ from transformer_lens.hook_points import HookedRootModule
 from transformer_lens import HookedTransformerConfig, HookedTransformer
 from transformer_lens.utils import get_device
 from datasets import Dataset
+from tokenizers import Tokenizer, models, normalizers, pre_tokenizers # type: ignore
+from transformers import PreTrainedTokenizerFast # type: ignore
 
 from iit.utils.iit_dataset import train_test_split, IITDataset
 from iit.utils.correspondence import Correspondence
 
-from ..utils import CustomDataset
+from ..utils import SimpleDataset
 
 
 class PolyCase(HookedRootModule, ABC):
@@ -52,7 +54,7 @@ class PolyBenchDataset(ABC):
         self, 
         N_samples: int, 
         map_dict: Optional[dict[str, int]] = None,
-        n_ctx: Optional[int] = None,
+        n_ctx: int = 15,
         seed: int = 42,
     ):
         np.random.seed(seed)
@@ -62,6 +64,11 @@ class PolyBenchDataset(ABC):
             raise ValueError("map_dict must be provided")
         self.map_dict = map_dict
         self.reverse_map_dict: dict[str, int] = {v: k for k, v in map_dict.items()}
+
+        self.tokens: np.ndarray | t.Tensor = np.array([])
+        self.labels: np.ndarray | t.Tensor = np.array([])
+        self.markers: np.ndarray | t.Tensor = np.array([])
+        self.str_tokens = np.array([])
 
         #generate lists of self.str_tokens and self.tokens:
         self.generate_tokens()
@@ -100,7 +107,7 @@ class PolyBenchDataset(ABC):
     
     def get_IIT_train_test_set(self, train_frac=0.8, seed=0):
 
-        decorated_dset = CustomDataset(
+        decorated_dset = SimpleDataset(
             inputs = np.array(self.dataset['tokens']),
             targets = np.array(self.dataset['labels']),
             markers = np.array(self.dataset['markers'])
@@ -116,3 +123,23 @@ class PolyBenchDataset(ABC):
         
     def left_greater(self,  sample):
         return np.cumsum(sample == 0) > np.cumsum(sample == 1)
+    
+
+
+def create_tokenizer(vocab: dict) -> PreTrainedTokenizerFast:
+    # Create a Tokenizer with a WordLevel model
+    tokenizer = Tokenizer(models.WordLevel(vocab=vocab, unk_token="UNK"))
+    
+    # Set the normalizer, pre-tokenizer, and decoder
+    tokenizer.normalizer = normalizers.Sequence([normalizers.Lowercase(), normalizers.StripAccents()])
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    
+    # Convert to Hugging Face tokenizer
+    hf_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
+    
+    # Add the special tokens to the Hugging Face tokenizer
+    hf_tokenizer.add_special_tokens({
+        'bos_token': 'BOS',
+        'pad_token': 'PAD',
+    })
+    return hf_tokenizer

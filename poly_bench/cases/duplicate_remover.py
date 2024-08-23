@@ -1,23 +1,16 @@
-from abc import ABC, abstractmethod 
 from jaxtyping import Float, Int, Bool
 from typing import Optional
 
 import torch as t
 import numpy as np
-from datasets import Dataset
-
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
-from transformer_lens.HookedTransformer import HookedTransformer
-from transformer_lens.hook_points import HookedRootModule, HookPoint
+from transformer_lens.hook_points import HookPoint
 from transformer_lens.utils import get_device
 from transformers import PreTrainedTokenizerFast
 from iit.utils.correspondence import Correspondence, HLNode, LLNode
 from iit.utils.index import Ix
-from iit.utils.iit_dataset import train_test_split
-from iit.utils.iit_dataset import IITDataset
 
-from ..utils import CustomDataset, create_tokenizer
-from .poly_case import PolyCase, PolyBenchDataset
+from .poly_case import PolyCase, PolyBenchDataset, create_tokenizer
 
 CASE_VOCAB = {
         'BOS': 0, 
@@ -115,9 +108,9 @@ class HighLevelDuplicateRemover(PolyCase):
         output = self.output_hook(self.masked_output(tokens, equal.to(bool)))
 
         # output pad at bos spot
-        true_output = t.nn.functional.one_hot(output, num_classes=self.d_vocab).float()
+        true_output = t.nn.functional.one_hot(output.long(), num_classes=self.d_vocab).float()
         
-        return true_output
+        return true_output.to(self.device)
 
     def __str__(self):
         return "duplicate_remover_model"
