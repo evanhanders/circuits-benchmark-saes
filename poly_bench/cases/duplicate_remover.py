@@ -3,12 +3,12 @@ from typing import Optional
 
 import torch as t
 import numpy as np
-from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
-from transformer_lens.hook_points import HookPoint
-from transformer_lens.utils import get_device
-from transformers import PreTrainedTokenizerFast
-from iit.utils.correspondence import Correspondence, HLNode, LLNode
-from iit.utils.index import Ix
+from transformer_lens.HookedTransformerConfig import HookedTransformerConfig # type: ignore
+from transformer_lens.hook_points import HookPoint # type: ignore
+from transformer_lens.utils import get_device # type: ignore
+from transformers import PreTrainedTokenizerFast # type: ignore
+from iit.utils.correspondence import Correspondence, HLNode, LLNode # type: ignore
+from iit.utils.index import Ix # type: ignore
 
 from .poly_case import PolyCase, PolyBenchDataset, create_tokenizer
 
@@ -49,7 +49,7 @@ class AreEqual(t.nn.Module):
     """ Checks equality of two tensors. """
 
     def forward(self, t1: Int[t.Tensor, "batch seq"], t2: Int[t.Tensor, "batch seq"]) -> Int[t.Tensor, "batch seq"]:
-        return (t1 == t2).to(int)
+        return (t1 == t2).to(t.int)
 
 class MaskedOutput(t.nn.Module):
     """ Masks an output tensor based on a boolean mask tensor. """
@@ -112,7 +112,7 @@ class HighLevelDuplicateRemover(PolyCase):
         
         return true_output.to(self.device)
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "duplicate_remover_model"
 
     
@@ -122,7 +122,7 @@ class DuplicateRemoverDataset(PolyBenchDataset):
         self, 
         N_samples: int, 
         map_dict: Optional[dict[str, int]] = CASE_VOCAB,
-        n_ctx: Optional[int] = None,
+        n_ctx: int = 15,
         seed: int = 42,
     ):
         super().__init__(
@@ -132,10 +132,10 @@ class DuplicateRemoverDataset(PolyBenchDataset):
             seed=seed
             )
 
-    def _generate_token_subset(self, N_samples, n_ctx):
+    def _generate_token_subset(self, N_samples: int, n_ctx: int) -> np.ndarray:
         return self._generate_random_tokens(N_samples, n_ctx)
 
-    def generate_tokens(self):
+    def generate_tokens(self) -> None:
 
         #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
         tokens = self._generate_token_subset(self.N_samples*2, self.n_ctx - 1)

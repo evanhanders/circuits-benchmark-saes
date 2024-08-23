@@ -1,20 +1,15 @@
-from abc import ABC, abstractmethod 
 from jaxtyping import Float, Int, Bool
 from typing import Optional
 
 import torch as t
 import numpy as np
-from datasets import Dataset
 
-from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
-from transformer_lens.HookedTransformer import HookedTransformer
-from transformer_lens.hook_points import HookedRootModule, HookPoint
-from transformer_lens.utils import get_device
-from transformers import PreTrainedTokenizerFast
-from iit.utils.correspondence import Correspondence, HLNode, LLNode
-from iit.utils.index import Ix
-from iit.utils.iit_dataset import train_test_split
-from iit.utils.iit_dataset import IITDataset
+from transformer_lens.HookedTransformerConfig import HookedTransformerConfig # type: ignore
+from transformer_lens.hook_points import HookPoint # type: ignore
+from transformer_lens.utils import get_device # type: ignore
+from transformers import PreTrainedTokenizerFast # type: ignore
+from iit.utils.correspondence import Correspondence, HLNode, LLNode # type: ignore
+from iit.utils.index import Ix # type: ignore
 
 
 from .poly_case import PolyCase, PolyBenchDataset, create_tokenizer
@@ -55,7 +50,7 @@ class TokenCountHead(t.nn.Module):
         tok_clone[tok_clone == self.token_to_count] = -1
         tok_clone[tok_clone != -1] = 0
         tok_clone[tok_clone == -1] = 1
-        return t.cumsum(tok_clone, dim=1).to(int)
+        return t.cumsum(tok_clone, dim=1).to(t.int)
 
     
 class AppearedPreviously(t.nn.Module):
@@ -68,7 +63,7 @@ class AppearedPreviously(t.nn.Module):
     
         output = {}
         for token, count in token_counts.items():
-            output[token] = t.logical_and(count > 1, tokens == token).to(int)
+            output[token] = t.logical_and(count > 1, tokens == token).to(t.int)
         return output
 
 class MaskBuilder(t.nn.Module):
@@ -78,7 +73,7 @@ class MaskBuilder(t.nn.Module):
         output = t.zeros_like(masks[0])
         for mask in masks:
             output = t.logical_or(output, mask)
-        return output.to(int)
+        return output.to(t.int)
 
 class MaskedOutput(t.nn.Module):
     """ Masks an output tensor based on a boolean mask tensor. """
@@ -167,7 +162,7 @@ class HighLevelUniqueExtractor(PolyCase):
         
         return true_output.to(self.device)
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "unique_extractor_model"
 
 class UniqueExtractorDataset(PolyBenchDataset):
@@ -176,7 +171,7 @@ class UniqueExtractorDataset(PolyBenchDataset):
         self, 
         N_samples: int, 
         map_dict: Optional[dict[str, int]] = CASE_VOCAB,
-        n_ctx: Optional[int] = None,
+        n_ctx: int = 15,
         seed: int = 42,
     ):
         super().__init__(
@@ -186,10 +181,10 @@ class UniqueExtractorDataset(PolyBenchDataset):
             seed=seed
             )
 
-    def _generate_token_subset(self, N_samples, n_ctx):
+    def _generate_token_subset(self, N_samples: int, n_ctx: int) -> np.ndarray:
         return self._generate_random_tokens(N_samples, n_ctx)
 
-    def generate_tokens(self):
+    def generate_tokens(self) -> None:
 
         #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
         tokens = self._generate_token_subset(self.N_samples*2, self.n_ctx - 1)

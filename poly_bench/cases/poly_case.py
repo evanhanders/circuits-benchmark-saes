@@ -4,21 +4,23 @@ from typing import Optional
 import torch as t
 import numpy as np
 from jaxtyping import Int, Float
-from transformer_lens.hook_points import HookedRootModule
-from transformer_lens import HookedTransformerConfig, HookedTransformer
-from transformer_lens.utils import get_device
-from datasets import Dataset
+from transformer_lens.hook_points import HookedRootModule # type: ignore
+from transformer_lens import HookedTransformerConfig, HookedTransformer # type: ignore
+from transformer_lens.utils import get_device # type: ignore
+from datasets import Dataset # type: ignore
 from tokenizers import Tokenizer, models, normalizers, pre_tokenizers # type: ignore
 from transformers import PreTrainedTokenizerFast # type: ignore
 
-from iit.utils.iit_dataset import train_test_split, IITDataset
-from iit.utils.correspondence import Correspondence
+from iit.utils.iit_dataset import train_test_split, IITDataset # type: ignore
+from iit.utils.correspondence import Correspondence # type: ignore
 
 from ..utils import SimpleDataset
 
 
 class PolyCase(HookedRootModule, ABC):
-    def __init__(self, vocab_dict: dict[str, int], device: str = get_device()):
+    def __init__(self, vocab_dict: Optional[dict[str, int]] = None, device: str = get_device()):
+        if vocab_dict is None:
+            raise ValueError("vocab_dict must be provided")
         super().__init__()
         self.vocab_dict = vocab_dict
         self.d_vocab = len(vocab_dict.keys())
@@ -63,7 +65,7 @@ class PolyBenchDataset(ABC):
         if map_dict is None:
             raise ValueError("map_dict must be provided")
         self.map_dict = map_dict
-        self.reverse_map_dict: dict[str, int] = {v: k for k, v in map_dict.items()}
+        self.reverse_map_dict: dict[int, str] = {v: k for k, v in map_dict.items()}
 
         self.tokens: np.ndarray | t.Tensor = np.array([])
         self.labels: np.ndarray | t.Tensor = np.array([])
@@ -85,10 +87,10 @@ class PolyBenchDataset(ABC):
             })
   
     @abstractmethod
-    def generate_tokens(self):
+    def generate_tokens(self) -> None:
         pass
 
-    def map_tokens_to_str(self):
+    def map_tokens_to_str(self) -> None:
         # Vectorized mapping using numpy
         vectorized_map = np.vectorize(self.map_dict.get)
         self.str_tokens = vectorized_map(self.tokens)
@@ -97,15 +99,15 @@ class PolyBenchDataset(ABC):
     def generate_labels(self, skip_first: bool = False) -> None:
         pass
 
-    def get_dataset(self):
+    def get_dataset(self) -> Dataset:
         return self.dataset
 
-    def _generate_random_tokens(self, N_samples, n_ctx):
+    def _generate_random_tokens(self, N_samples: int, n_ctx: int) -> np.ndarray:
         d_vocab = len(self.map_dict.keys())
-        samples =  t.randint(2, d_vocab, (N_samples, n_ctx))#remove BOS, PAD -- always assume these are the first 2 in the dictionary.
-        return t.unique(samples, dim=0)
+        samples =  t.randint(2, d_vocab, (N_samples, n_ctx)).numpy() #remove BOS, PAD -- always assume these are the first 2 in the dictionary.
+        return np.unique(samples, axis=0)
     
-    def get_IIT_train_test_set(self, train_frac=0.8, seed=0):
+    def get_IIT_train_test_set(self, train_frac: float = 0.8, seed: int = 0) -> tuple[IITDataset, IITDataset]:
 
         decorated_dset = SimpleDataset(
             inputs = np.array(self.dataset['tokens']),
@@ -120,11 +122,7 @@ class PolyBenchDataset(ABC):
         train_set = IITDataset(train_dataset, train_dataset, seed=seed)
         test_set = IITDataset(test_dataset, test_dataset, seed=seed)
         return train_set, test_set
-        
-    def left_greater(self,  sample):
-        return np.cumsum(sample == 0) > np.cumsum(sample == 1)
     
-
 
 def create_tokenizer(vocab: dict) -> PreTrainedTokenizerFast:
     # Create a Tokenizer with a WordLevel model

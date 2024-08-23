@@ -23,7 +23,7 @@ def save_model_to_dir(model: HookedTransformer, local_dir: str) -> pathlib.Path:
     return directory
 
 
-def save_to_hf(local_dir: str, message: str, repo_name: str = 'evanhanders/polysemantic-benchmarks'):
+def save_to_hf(local_dir: str, message: str, repo_name: str = 'evanhanders/polysemantic-benchmarks') -> None:
     upload_folder(
         folder_path=local_dir,
         repo_id=repo_name,
@@ -37,7 +37,7 @@ def load_from_hf(
         benchmarks_file: Optional[str] = None,
         repo_name: str = 'evanhanders/polysemantic-benchmarks',
         hl_kwargs: dict = {}
-        ) -> Tuple[HookedTransformer, PolyCase, PolyBenchDataset | list[PolyBenchDataset]]:
+        ) -> Tuple[HookedTransformer, PolyCase, type[PolyBenchDataset] | list[type[PolyBenchDataset]]]:
     model_tensors_file = hf_hub_download(repo_id=repo_name, filename=f'{model_name}/{model_file}')
     model_config_file = hf_hub_download(repo_id=repo_name, filename=f'{model_name}/{config_file}')
     if benchmarks_file is not None:
@@ -56,7 +56,7 @@ def load_from_hf(
         with open(model_benchmarks_file, 'r') as f:
             model_cases = json.load(f)
         hl_model_cases = [str_to_model_dict[case] for case in model_cases]
-        dataset: PolyBenchDataset | list[PolyBenchDataset] = [str_to_dataset_dict[case] for case in model_cases]
+        dataset: type[PolyBenchDataset] | list[type[PolyBenchDataset]] = [str_to_dataset_dict[case] for case in model_cases]
         hl_model = PolyHLModel(hl_classes=hl_model_cases, **hl_kwargs)
     else:
 
@@ -67,7 +67,7 @@ def load_from_hf(
 
     return ll_model, hl_model, dataset
 
-def save_poly_model_to_dir(ll_model: HookedTransformer, hl_model, local_dir: str) -> pathlib.Path:
+def save_poly_model_to_dir(ll_model: HookedTransformer, hl_model: PolyHLModel, local_dir: str) -> pathlib.Path:
     directory = save_model_to_dir(ll_model, local_dir)
     model_cases = [str(model) for model in hl_model.hl_models]
     with open(directory / 'cases.json', 'w') as f:

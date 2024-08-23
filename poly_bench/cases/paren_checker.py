@@ -1,18 +1,15 @@
-from abc import ABC, abstractmethod 
 from jaxtyping import Float, Int, Bool
 from typing import Optional
 
 import torch as t
 import numpy as np
-from datasets import Dataset
 
-from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
-from transformer_lens.HookedTransformer import HookedTransformer
-from transformer_lens.hook_points import HookedRootModule, HookPoint
-from transformer_lens.utils import get_device
-from transformers import PreTrainedTokenizerFast
-from iit.utils.correspondence import Correspondence, HLNode, LLNode
-from iit.utils.index import Ix
+from transformer_lens.HookedTransformerConfig import HookedTransformerConfig # type: ignore
+from transformer_lens.hook_points import HookPoint # type: ignore
+from transformer_lens.utils import get_device # type: ignore
+from transformers import PreTrainedTokenizerFast # type: ignore
+from iit.utils.correspondence import Correspondence, HLNode, LLNode # type: ignore
+from iit.utils.index import Ix # type: ignore
 
 
 from .poly_case import PolyCase, PolyBenchDataset, create_tokenizer
@@ -50,7 +47,7 @@ class TokenCountHead(t.nn.Module):
         tok_clone[tok_clone == self.token_to_count] = -1
         tok_clone[tok_clone != -1] = 0
         tok_clone[tok_clone == -1] = 1
-        return t.cumsum(tok_clone, dim=1).to(int)
+        return t.cumsum(tok_clone, dim=1).to(t.int)
 
 class ElevationCalculator(t.nn.Module):
     """ Calculates the elevation at each position in the context"""
@@ -88,7 +85,7 @@ class HorizonLookbackHead(t.nn.Module): #have this be a head that finds the mini
 
 class HighLevelParensBalanceChecker(PolyCase):
 
-    def __init__(self, vocab_dict: Optional[dict[str, int]] = CASE_VOCAB, device=get_device()):
+    def __init__(self, vocab_dict: Optional[dict[str, int]] = CASE_VOCAB, device: str = get_device()):
         super().__init__(vocab_dict, device=device)
         
         self.input_hook = HookPoint()
@@ -169,7 +166,7 @@ class HighLevelParensBalanceChecker(PolyCase):
         
         return true_output
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "parens_checker_model"
 
 
@@ -178,7 +175,7 @@ class BalancedParensDataset(PolyBenchDataset):
         self, 
         N_samples: int, 
         map_dict: Optional[dict[str, int]] = CASE_VOCAB,
-        n_ctx: Optional[int] = 40,
+        n_ctx: int = 15,
         seed: int = 42,
     ):
         super().__init__(
@@ -188,10 +185,10 @@ class BalancedParensDataset(PolyBenchDataset):
             seed=seed
             )
 
-    def passes_balance(self,  sample):
+    def passes_balance(self,  sample: np.ndarray) -> np.ndarray:
         return np.cumsum(sample == self.map_dict['(']) == np.cumsum(sample == self.map_dict[')'])
         
-    def passes_horizon(self, sample):
+    def passes_horizon(self, sample: np.ndarray) -> np.ndarray:
         mod = np.copy(sample)
         mod[mod == self.map_dict[')']] = -1
         mod[mod == self.map_dict['(']] = -2
@@ -203,12 +200,10 @@ class BalancedParensDataset(PolyBenchDataset):
         horizon_lookback = np.cumprod(horizon_bool)
         return horizon_lookback.astype(bool)
     
-    def passes_balance_test(self, sample):
-        if isinstance(sample, t.Tensor):
-            sample = sample.numpy()
+    def passes_balance_test(self, sample: np.ndarray) -> np.ndarray:
         return np.logical_and(self.passes_balance(sample), self.passes_horizon(sample))
 
-    def _generate_token_subset(self, N_samples, n_ctx, passes_balance=True, passes_horizon=True):
+    def _generate_token_subset(self, N_samples: int, n_ctx: int, passes_balance: bool = True, passes_horizon: bool = True) -> np.ndarray:
         """ Samples that fail both tests """
         assert n_ctx % 2 == 0, "n_ctx must be even."
         
@@ -217,7 +212,7 @@ class BalancedParensDataset(PolyBenchDataset):
         good_samples = []
         while remaining_samples > 0:
             if passes_balance:
-                pos_lengths = (n_ctx//2) * t.ones(generated_samples).to(int)
+                pos_lengths = (n_ctx//2) * t.ones(generated_samples).to(t.int)
                 neg_lengths = pos_lengths
             else:
                 # Generate +1 and -1 tensors so we ensure imbalance
@@ -226,17 +221,17 @@ class BalancedParensDataset(PolyBenchDataset):
                 #Generate all from 0 - n_ctx//2 - 1
                 pos_lengths = t.randint(0, n_ctx//2, (generated_samples,))
                 #use coin flip to flip half to range n_ctx//2 + 1 -> n_ctx
-                pos_lengths[coin_flip == 0] = t.randint(n_ctx//2 + 1, n_ctx, ((coin_flip == 0).sum(),))
+                pos_lengths[coin_flip == 0] = t.randint(n_ctx//2 + 1, n_ctx, (int((coin_flip == 0).sum().item()),))
                 neg_lengths = n_ctx - pos_lengths
             samples = [ t.cat((
                 t.ones((p.item())),
                 -t.ones((n.item()))
             )) for p, n in zip(pos_lengths, neg_lengths)]
-            samples = t.stack(samples)
+            stacked_samples = t.stack(samples)
             
             # shuffle
             indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
-            shuffled = t.gather(samples, 1, indices)
+            shuffled = t.gather(stacked_samples, 1, indices)
 
             # create random elevations
             elevation = t.cumsum(shuffled, dim=1)
@@ -253,19 +248,19 @@ class BalancedParensDataset(PolyBenchDataset):
             
         return t.unique(t.cat(good_samples, dim=0), dim=0)
         
-    def _generate_balanced_tokens(self, N_samples, n_ctx):
+    def _generate_balanced_tokens(self, N_samples: int, n_ctx: int) -> np.ndarray:
         return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_horizon=True)
 
-    def _generate_horizon_failures(self, N_samples, n_ctx):
+    def _generate_horizon_failures(self, N_samples: int, n_ctx: int) -> np.ndarray:
         return self._generate_token_subset(N_samples, n_ctx, passes_balance=True, passes_horizon=False)
         
-    def _generate_balance_failures(self, N_samples, n_ctx):
+    def _generate_balance_failures(self, N_samples: int, n_ctx: int) -> np.ndarray:
         return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_horizon=True)
         
-    def _generate_absolute_failures(self, N_samples, n_ctx):
+    def _generate_absolute_failures(self, N_samples: int, n_ctx: int) -> np.ndarray:
         return self._generate_token_subset(N_samples, n_ctx, passes_balance=False, passes_horizon=False)
         
-    def generate_tokens(self):
+    def generate_tokens(self) -> None:
 
         #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
         balanced = self._generate_balanced_tokens(self.N_samples, self.n_ctx - 1)
@@ -273,12 +268,12 @@ class BalancedParensDataset(PolyBenchDataset):
         fail_bal = self._generate_balance_failures(self.N_samples // 2, self.n_ctx - 1)
         fail_both = self._generate_absolute_failures(self.N_samples // 2, self.n_ctx - 1)
 
-        dataset = t.cat([
+        dataset = np.concatenate([
             balanced[:self.N_samples // 4],
             fail_ele[:self.N_samples // 4],
             fail_bal[:self.N_samples // 4],
             fail_both[:self.N_samples // 4]
-        ], dim = 0)
+        ], axis = 0)
         dataset[dataset == 1]  = self.map_dict['(']
         dataset[dataset == -1] = self.map_dict[')']
         dataset = dataset[t.randperm(dataset.shape[0]),:] #shuffle the dataset.

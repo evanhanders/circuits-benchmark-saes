@@ -1,4 +1,4 @@
-name: testing
+name: CI
 
 on:
   push:
@@ -34,3 +34,6 @@ jobs:
 
     - name: Run tests
       run: poetry run pytest
+    
+    - name: Run mypy type checks
+      run: poetry run mypy --config-file mypy.ini

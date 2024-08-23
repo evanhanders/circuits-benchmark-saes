@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import Optional, List
 from jaxtyping import Int, Float
 
+import numpy as np
 import torch as t
 from torch import nn, Tensor
 from transformer_lens.hook_points import HookedRootModule, HookPoint # type: ignore
@@ -17,7 +18,7 @@ from .utils import SimpleDataset # type: ignore
 
 class PolyModelDataset:
 
-    def __init__(self, datasets: list[PolyBenchDataset], n_ctx: int, train_frac=0.8, seed=42):
+    def __init__(self, datasets: list[PolyBenchDataset], n_ctx: int, train_frac: float = 0.8, seed: int = 42):
         N_samples = None
         for dataset in datasets:
             if dataset.n_ctx >= n_ctx:
@@ -34,7 +35,7 @@ class PolyModelDataset:
         max_d_vocab = 0
         for i, dataset in enumerate(datasets):
             padding = [dataset.map_dict['PAD']]*(n_ctx - dataset.n_ctx - 1) 
-            dataset.tokens = t.tensor([ [i] + list(seq) + padding for seq in dataset.tokens])
+            dataset.tokens = np.array([ [i] + list(seq) + padding for seq in dataset.tokens])
             dataset.map_tokens_to_str()
             dataset.generate_labels(skip_first=True)
             if dataset.labels.shape[-1] > max_d_vocab:
@@ -74,10 +75,10 @@ class PolyModelDataset:
         self.train_set = IITDataset(train_dataset, train_dataset, seed=seed)
         self.test_set = IITDataset(test_dataset, test_dataset, seed=seed)
     
-    def get_IIT_train_test_set(self):
+    def get_IIT_train_test_set(self) -> tuple[IITDataset, IITDataset]:
         return self.train_set, self.test_set
 
-    def get_dataset(self):
+    def get_dataset(self) -> SimpleDataset:
         return self.dataset        
         
 
@@ -85,7 +86,7 @@ class PolyHLModel(HookedRootModule):
 
     def __init__(
             self, 
-            hl_classes: list[PolyCase], 
+            hl_classes: list[type[PolyCase]], 
             attn_suffix: str = 'attn.hook_z', #force all attn hooks to have the same suffix
             mlp_suffix: str = 'mlp.hook_post', #force all mlp hooks to have the same suffix'
             size_expansion: int = 1,
@@ -306,15 +307,16 @@ class PolyHLModel(HookedRootModule):
 
             # define hooks.
 
-            def simple_replacement_hook(x, hook):
+            def simple_replacement_hook(x: t.Tensor, hook: HookPoint) -> t.Tensor:
                 x[:] = caches[i][hook.name].to(x.device)
+                return x
 
-            mlp_replacement_hook = simple_replacement_hook
+            # mlp_replacement_hook = simple_replacement_hook
             
-            def attn_replacement_hook(x, hook, index: Optional[TorchIndex] = None):
-                x[index.as_index] = caches[i][hook.name][index.as_index]
+            # def attn_replacement_hook(x, hook, index: TorchIndex):
+            #     x[index.as_index] = caches[i][hook.name][index.as_index]
 
-            hooks = []
+            hook_funcs = []
             #go through self.corr_dict and link up each hook with corresponding hook(s) in HL tracr models.
             for layer in range(self.cfg.n_layers):
 
@@ -324,7 +326,7 @@ class PolyHLModel(HookedRootModule):
                 #unpack from cache
                 if hl_model_hook_name is not None:
                     for node in hl_model_hook_name:
-                        hooks.append((node.name, simple_replacement_hook))
+                        hook_funcs.append((node.name, simple_replacement_hook))
                 
                 # Attn
                 hook_name = f'blocks.{layer}.{self.attn_suffix}'
@@ -332,11 +334,11 @@ class PolyHLModel(HookedRootModule):
                     hl_model_hook_name = self.corr_mapping[f'{hook_name}.{head}'][i]
                     if hl_model_hook_name is not None:
                         for node in hl_model_hook_name:
-                            hooks.append((node.name, simple_replacement_hook))
-                            # hooks.append((node.name, partial(attn_replacement_hook, index=TorchIndex([None,None,head,None])))) # for tracr.
+                            hook_funcs.append((node.name, simple_replacement_hook))
+                            # hook_funcs.append((node.name, partial(attn_replacement_hook, index=TorchIndex([None,None,head,None])))) # for tracr.
 
-            # print(hooks)
-            model_output = hl_model.run_with_hooks((these_tokens, None, None), fwd_hooks=hooks)
+            # print(hook_funcs)
+            model_output = hl_model.run_with_hooks((these_tokens, None, None), fwd_hooks=hook_funcs)
             model_outputs.append(model_output)
         
         outputs = self.sort_output(tokens, model_outputs, task_ids)

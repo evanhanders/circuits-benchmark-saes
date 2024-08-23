@@ -1,21 +1,15 @@
-from abc import ABC, abstractmethod 
 from jaxtyping import Float, Int, Bool
 from typing import Optional
 
 import torch as t
 import numpy as np
-from datasets import Dataset
-from tqdm.notebook import tqdm
 
-from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
-from transformer_lens.HookedTransformer import HookedTransformer
-from transformer_lens.hook_points import HookedRootModule, HookPoint
-from transformers import PreTrainedTokenizerFast
-from transformer_lens.utils import get_device
-from iit.utils.correspondence import Correspondence, HLNode, LLNode
-from iit.utils.index import Ix
-from iit.utils.iit_dataset import train_test_split
-from iit.utils.iit_dataset import IITDataset
+from transformer_lens.HookedTransformerConfig import HookedTransformerConfig # type: ignore
+from transformer_lens.hook_points import HookPoint # type: ignore
+from transformer_lens.utils import get_device # type: ignore
+from transformers import PreTrainedTokenizerFast # type: ignore
+from iit.utils.correspondence import Correspondence, HLNode, LLNode # type: ignore
+from iit.utils.index import Ix # type: ignore
 
 
 from .poly_case import PolyCase, PolyBenchDataset, create_tokenizer
@@ -55,7 +49,7 @@ class TokenCountHead(t.nn.Module):
         tok_clone[tok_clone == self.token_to_count] = -1
         tok_clone[tok_clone != -1] = 0
         tok_clone[tok_clone == -1] = 1
-        return t.cumsum(tok_clone, dim=1).to(int)
+        return t.cumsum(tok_clone, dim=1).to(t.int)
 
 class GreaterThan(t.nn.Module):
     """ Calculates if there are more left parens than right parens """
@@ -124,7 +118,7 @@ class HighLevelLeftGreater(PolyCase):
         
         return true_output
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "left_greater_model"
 
 class LeftGreaterDataset(PolyBenchDataset):
@@ -133,7 +127,7 @@ class LeftGreaterDataset(PolyBenchDataset):
         self, 
         N_samples: int, 
         map_dict: Optional[dict[str, int]] = CASE_VOCAB,
-        n_ctx: Optional[int] = 15,
+        n_ctx: int = 15,
         seed: int = 42,
     ):
         super().__init__(
@@ -143,10 +137,10 @@ class LeftGreaterDataset(PolyBenchDataset):
             seed=seed
             )
         
-    def left_greater(self,  sample):
+    def left_greater(self, sample: np.ndarray) -> np.ndarray:
         return np.cumsum(sample == self.map_dict['(']) > np.cumsum(sample == self.map_dict[')'])
 
-    def _generate_token_subset(self, N_samples, n_ctx, left_greater=True):        
+    def _generate_token_subset(self, N_samples: int, n_ctx: int, left_greater: bool = True) -> np.ndarray:        
         generated_samples = min(N_samples, 1000)
         remaining_samples = N_samples
         good_samples = []
@@ -161,32 +155,32 @@ class LeftGreaterDataset(PolyBenchDataset):
                 t.ones((p.item())),
                 -t.ones((n.item()))
             )) for p, n in zip(pos_lengths, neg_lengths)]
-            samples = t.stack(samples)
+            stacked_samples = t.stack(samples)
             
             # shuffle
             indices = t.stack([t.randperm(n_ctx) for _ in range(generated_samples)])
-            shuffled = t.gather(samples, 1, indices)
+            shuffled = t.gather(stacked_samples, 1, indices)
             good_samples.append(shuffled)
             remaining_samples -= good_samples[-1].shape[0]
             
-        return t.unique(t.cat(good_samples, dim=0), dim=0)
+        return t.unique(t.cat(good_samples, dim=0), dim=0).numpy()
         
-    def _generate_left_greater(self, N_samples, n_ctx):
+    def _generate_left_greater(self, N_samples: int, n_ctx: int) -> np.ndarray:
         return self._generate_token_subset(N_samples, n_ctx, left_greater=True)
     
-    def _generate_left_not_greater(self, N_samples, n_ctx):
+    def _generate_left_not_greater(self, N_samples: int, n_ctx: int) -> np.ndarray:
         return self._generate_token_subset(N_samples, n_ctx, left_greater=False)
 
-    def generate_tokens(self):
+    def generate_tokens(self) -> None:
 
         #Generate a bunch of examples -- we'll only use a fraction but due to uniqueness we won't get as many as we want.
         greater = self._generate_token_subset(self.N_samples, self.n_ctx - 1, left_greater=True)
         less = self._generate_token_subset(self.N_samples, self.n_ctx - 1, left_greater=False)
 
-        dataset = t.cat([
+        dataset = np.concatenate([
             greater[:self.N_samples // 2],
             less[:self.N_samples // 2],
-        ], dim = 0)
+        ], axis = 0)
         dataset[dataset == 1]  = self.map_dict['(']
         dataset[dataset == -1] = self.map_dict[')']
         dataset = dataset[t.randperm(dataset.shape[0]),:] #shuffle the dataset.
