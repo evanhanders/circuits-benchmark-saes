@@ -22,10 +22,10 @@ def test_HL_duplicate_remover_components():
     true_equal = [[a == b for a, b in zip(e, p)] for e, p in zip(tokens, true_prev_tokens)]
     true_output = [[1 if eq else a for a, eq in zip(tokens[i], true_equal[i])] for i in range(len(tokens))]
 
-    tokens = t.Tensor(tokens).to(int)
-    true_prev_tokens = t.Tensor(true_prev_tokens).to(int)
-    true_equal = t.Tensor(true_equal).to(int)
-    true_output = t.Tensor(true_output).to(int)
+    tokens = t.Tensor(tokens).to(t.int)
+    true_prev_tokens = t.Tensor(true_prev_tokens).to(t.int)
+    true_equal = t.Tensor(true_equal).to(t.int)
+    true_output = t.Tensor(true_output).to(t.int)
     
     checker = HighLevelDuplicateRemover()
     _, cache   = checker.run_with_cache((tokens, None, None))
@@ -72,12 +72,12 @@ def test_HL_left_greater_components():
         [ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ]
 
-    tokens = t.Tensor(tokens).to(int)
-    true_lefts = t.Tensor(true_lefts).to(int)
-    true_rights = t.Tensor(true_rights).to(int)
+    tokens = t.Tensor(tokens).to(t.int)
+    true_lefts = t.Tensor(true_lefts).to(t.int)
+    true_rights = t.Tensor(true_rights).to(t.int)
     true_parens = t.stack([true_lefts, true_rights])
-    true_mlp0_check = t.Tensor(true_mlp0_check).to(bool)
-    true_output = t.nn.functional.one_hot(t.Tensor(true_output).to(int), num_classes=4).float()
+    true_mlp0_check = t.Tensor(true_mlp0_check).to(t.bool)
+    true_output = t.nn.functional.one_hot(t.Tensor(true_output).long(), num_classes=4).to(t.float)
 
     checker = HighLevelLeftGreater()
     output, cache   = checker.run_with_cache((tokens, None, None))
@@ -148,19 +148,18 @@ def test_HL_parens_balancer_components():
         [ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ]
 
-    tokens = t.Tensor(tokens).to(int)
-    true_lefts = t.Tensor(true_lefts).to(int)
-    true_rights = t.Tensor(true_rights).to(int)
+    tokens = t.Tensor(tokens).to(t.int)
+    true_lefts = t.Tensor(true_lefts).to(t.int)
+    true_rights = t.Tensor(true_rights).to(t.int)
     true_parens_counts = t.stack((true_lefts, true_rights))
-    true_mlp0_check = t.Tensor(true_mlp0_check).to(int)
-    true_mlp1_check = t.Tensor(true_mlp1_check).to(bool)
-    true_hor_lookback = t.Tensor(true_hor_lookback).to(bool)
-    true_output = t.Tensor(true_output).to(int)
+    true_mlp0_check = t.Tensor(true_mlp0_check).to(t.int)
+    true_mlp1_check = t.Tensor(true_mlp1_check).to(t.bool)
+    true_hor_lookback = t.Tensor(true_hor_lookback).to(t.bool)
+    true_output = t.Tensor(true_output).long()
     
 
     checker = HighLevelParensBalanceChecker()
     _, cache   = checker.run_with_cache((tokens, None, None))
-    # print(cache['right_parens_hook'] - true_rights)
     assert t.allclose(cache['paren_counts_hook'], true_parens_counts)
     assert t.allclose(cache['mlp0_hook'], true_mlp0_check)
     assert t.allclose(cache['mlp1_hook'], true_mlp1_check)
@@ -225,11 +224,11 @@ def test_HL_unique_extractor_components():
         [0, 2, 3, 4, 1, 1, 1, 1, 1],
     ]
 
-    tokens = t.tensor(tokens).to(int)
-    true_counts = t.tensor(true_counts).to(int)
-    true_appeared = t.tensor(true_appeared).to(int)
-    true_mask = t.tensor(true_mask).to(int)
-    true_output = t.tensor(true_output).to(int)
+    tokens = t.tensor(tokens).to(t.int)
+    true_counts = t.tensor(true_counts).to(t.int)
+    true_appeared = t.tensor(true_appeared).to(t.int)
+    true_mask = t.tensor(true_mask).to(t.int)
+    true_output = t.tensor(true_output).to(t.int)
     
     checker = HighLevelUniqueExtractor()
     _, cache   = checker.run_with_cache((tokens, None, None))
