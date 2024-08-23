@@ -1,6 +1,6 @@
 # Installation
 
-To install this repository, you'll first need to [install graphviz](https://graphviz.org/download/) due to this repo's dependency on circuits-benchmark. Then create a fresh poetry virtual environment. To do so, make sure the following poetry config options are set:
+To install this repository, create a fresh poetry virtual environment. If you haven't used poetry before, it can be helpful to make sure the following poetry config options are set:
 
 ```sh
 poetry config virtualenvs.create true
@@ -15,7 +15,9 @@ poetry config --list
 
 Then clone this repository and install it and its dependencies:
 ```sh
-TODO
-cd TODO
+git clone https://github.com/evanhanders/polysemantic-benchmark.git
+cd polysemantic-benchmark
 poetry install
 ```
+
+Once the repo is installed, you should be able to run one of the notebooks in the root folder to train or load models.
